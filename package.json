@@ -1,0 +1,15 @@
+{
+  "name": "egboot-server",
+  "version": "1.0.0",
+  "description": "Server for Nour Fashion Bot",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "axios": "^1.6.2",
+    "mongoose": "^8.0.0",
+    "dotenv": "^16.3.1"
+  }
+}
