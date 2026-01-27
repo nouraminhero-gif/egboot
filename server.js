@@ -6,60 +6,60 @@ const mongoose = require('mongoose');
 const app = express();
 app.use(express.json());
 
-// مفتاح الجمناي بتاعك اللي بعتهولي
-const GEMINI_KEY = "AIzaSyD6uS6-538W1FpP26X57S0S20W66M48"; 
-const PAGE_TOKEN = process.env.PAGE_ACCESS_TOKEN; 
-const VERIFY_TOKEN = "egboot_2026"; 
+// تشخيص المفاتيح في الـ Logs عشان نتأكد إن Railway قاريها
+console.log("🔍 Checking Environment Variables...");
+console.log("GEMINI_API_KEY set:", !!process.env.GEMINI_API_KEY);
+console.log("PAGE_ACCESS_TOKEN set:", !!process.env.PAGE_ACCESS_TOKEN);
 
-// رابط الداتا بيز Egboot
 const DB_URI = "mongodb://nouraminhero:nour2010@ac-u6m8v7y-shard-00-00.mongodb.net:27017,ac-u6m8v7y-shard-00-01.mongodb.net:27017,ac-u6m8v7y-shard-00-02.mongodb.net:27017/egboot?ssl=true&replicaSet=atlas-13o8p5-shard-0&authSource=admin";
 
 mongoose.connect(DB_URI)
-  .then(() => console.log('✅ DATABASE CONNECTED!'))
-  .catch(err => console.log('❌ DB ERROR:', err.message));
-
-app.get('/', (req, res) => res.send('Egboot Cloud Server is Active! 🚀'));
+    .then(() => console.log('✅ Connected to MongoDB Atlas'))
+    .catch(err => console.log('❌ Database Error:', err.message));
 
 app.get('/webhook', (req, res) => {
-  if (req.query['hub.verify_token'] === VERIFY_TOKEN) {
-    res.send(req.query['hub.challenge']);
-  } else {
-    res.send('Verify Token Mismatch');
-  }
+    if (req.query['hub.verify_token'] === process.env.VERIFY_TOKEN) {
+        res.send(req.query['hub.challenge']);
+    } else {
+        res.send('Token Mismatch');
+    }
 });
 
 app.post('/webhook', async (req, res) => {
-  const body = req.body;
-  if (body.object === 'page') {
-    for (let entry of body.entry) {
-      if (entry.messaging) {
-        for (let event of entry.messaging) {
-          if (event.message && event.message.text) {
-            try {
-              // طلب الرد من Gemini النسخة v1beta اللي بتحل مشكلة الـ API القديم
-              const response = await axios.post(
-                `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_KEY}`,
-                { contents: [{ parts: [{ text: `أنت مساعد ذكي لمتجر Nour Fashion في مصر. رد بلهجة مصرية ودودة على: ${event.message.text}` }] }] }
-              );
+    const body = req.body;
+    if (body.object === 'page') {
+        for (let entry of body.entry) {
+            for (let event of entry.messaging) {
+                if (event.message && event.message.text) {
+                    try {
+                        const userMessage = event.message.text;
+                        console.log(`📩 New message: ${userMessage}`);
 
-              const aiReply = response.data.candidates[0].content.parts[0].text;
-              console.log("🤖 AI Reply:", aiReply);
+                        // طلب الرد من Gemini
+                        const geminiRes = await axios.post(
+                            `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${process.env.GEMINI_API_KEY.trim()}`,
+                            { contents: [{ parts: [{ text: `رد بلهجة مصرية قصيرة: ${userMessage}` }] }] }
+                        );
 
-              // إرسال الرد للعميل على ماسنجر
-              await axios.post(`https://graph.facebook.com/v18.0/me/messages?access_token=${PAGE_TOKEN}`, {
-                recipient: { id: event.sender.id },
-                message: { text: aiReply }
-              });
-            } catch (error) {
-              console.error("⚠️ Error:", error.response?.data?.error?.message || error.message);
+                        const aiReply = geminiRes.data.candidates[0].content.parts[0].text;
+                        console.log(`🤖 AI says: ${aiReply}`);
+
+                        // إرسال الرد للفيسبوك
+                        await axios.post(`https://graph.facebook.com/v18.0/me/messages?access_token=${process.env.PAGE_ACCESS_TOKEN.trim()}`, {
+                            recipient: { id: event.sender.id },
+                            message: { text: aiReply }
+                        });
+
+                    } catch (error) {
+                        // طباعة الخطأ بالتفصيل عشان نعرف المشكلة فين بالظبط
+                        console.error("⚠️ Detailed Error:", error.response?.data?.error || error.message);
+                    }
+                }
             }
-          }
         }
-      }
+        res.sendStatus(200);
     }
-    res.sendStatus(200);
-  }
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 Server is LIVE on port ${PORT}`));
+app.listen(PORT, () => console.log(`🚀 Egboot Server is Ready on Port ${PORT}`));
