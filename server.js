@@ -6,43 +6,47 @@ const mongoose = require('mongoose');
 const app = express();
 app.use(express.json());
 
-// 1. رابط الداتا بيز المباشر (Egboot)
+// 1. قاعدة البيانات - الربط المباشر لضمان تخطي حظر الـ IP
 const DB_URI = "mongodb://nouraminhero:nour2010@ac-u6m8v7y-shard-00-00.mongodb.net:27017,ac-u6m8v7y-shard-00-01.mongodb.net:27017,ac-u6m8v7y-shard-00-02.mongodb.net:27017/egboot?ssl=true&replicaSet=atlas-13o8p5-shard-0&authSource=admin";
 
 mongoose.connect(DB_URI)
-    .then(() => console.log('✅ Connected to MongoDB Atlas'))
+    .then(() => console.log('✅ Connected to MongoDB!'))
     .catch(err => console.log('❌ DB Error:', err.message));
 
-// 2. معالجة رسايل الفيسبوك والربط مع Gemini
+// 2. استقبال رسائل الفيسبوك
 app.post('/webhook', async (req, res) => {
     const body = req.body;
     if (body.object === 'page') {
         for (let entry of body.entry) {
             for (let event of entry.messaging) {
                 if (event.message && event.message.text) {
+                    const userText = event.message.text;
+                    console.log(`📩 New Message: ${userText}`);
+
                     try {
-                        const userMessage = event.message.text;
-                        console.log(`📩 New message: ${userMessage}`);
+                        // الرابط ده هو الوحيد اللي شغال دلوقتي بدون 404 (v1beta/models/gemini-pro)
+                        const API_KEY = process.env.GEMINI_API_KEY.trim();
+                        const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=${API_KEY}`;
 
-                        // استخدام موديل gemini-pro (الرابط المستقر للنسخة v1beta)
-                        const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=${process.env.GEMINI_API_KEY.trim()}`;
-                        
-                        const geminiRes = await axios.post(geminiUrl, {
-                            contents: [{ parts: [{ text: `أنت مساعد ذكي لمتجر Nour Fashion. رد بمصري: ${userMessage}` }] }]
+                        const response = await axios.post(geminiUrl, {
+                            contents: [{ parts: [{ text: `أنت مساعد ذكي لمتجر Nour Fashion في مصر. رد بلهجة مصرية قصيرة: ${userText}` }] }]
                         });
 
-                        const aiReply = geminiRes.data.candidates[0].content.parts[0].text;
-                        console.log(`🤖 AI Reply: ${aiReply}`);
+                        // التأكد إن الرد جه من Gemini
+                        if (response.data.candidates && response.data.candidates[0].content) {
+                            const aiReply = response.data.candidates[0].content.parts[0].text;
+                            console.log(`🤖 AI Reply: ${aiReply}`);
 
-                        // إرسال الرد للعميل
-                        await axios.post(`https://graph.facebook.com/v18.0/me/messages?access_token=${process.env.PAGE_ACCESS_TOKEN.trim()}`, {
-                            recipient: { id: event.sender.id },
-                            message: { text: aiReply }
-                        });
-
+                            // إرسال الرد لفيسبوك
+                            const PAGE_TOKEN = process.env.PAGE_ACCESS_TOKEN.trim();
+                            await axios.post(`https://graph.facebook.com/v18.0/me/messages?access_token=${PAGE_TOKEN}`, {
+                                recipient: { id: event.sender.id },
+                                message: { text: aiReply }
+                            });
+                        }
                     } catch (error) {
-                        // طباعة تفاصيل الخطأ كاملة للتشخيص
-                        console.error("⚠️ Detailed Error:", error.response?.data?.error || error.message);
+                        // هنا السيرفر هيقولنا "بالظبط" إيه اللي مضايق جوجل
+                        console.error("⚠️ Detailed Error:", error.response?.data?.error?.message || error.message);
                     }
                 }
             }
@@ -52,7 +56,8 @@ app.post('/webhook', async (req, res) => {
 });
 
 app.get('/webhook', (req, res) => {
-    if (req.query['hub.verify_token'] === process.env.VERIFY_TOKEN) {
+    const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "egboot_2026";
+    if (req.query['hub.verify_token'] === VERIFY_TOKEN) {
         res.send(req.query['hub.challenge']);
     } else { res.send('Wrong Token'); }
 });
