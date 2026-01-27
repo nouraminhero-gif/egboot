@@ -4,10 +4,10 @@ const axios = require('axios');
 const app = express();
 app.use(express.json());
 
-// 1. تعريف المتغيرات مع حماية ضد الـ Undefined (عشان نخلص من خطأ الـ trim)
-const OPENAI_KEY = (process.env.OPENAI_API_KEY || "").trim();
-const PAGE_TOKEN = (process.env.PAGE_ACCESS_TOKEN || "").trim();
-const VERIFY_TOKEN = (process.env.VERIFY_TOKEN || "egboot_2026").trim();
+// قراءة المتغيرات مباشرة بدون أي عمليات تنظيف (trim) لمنع الـ Undefined Error
+const OPENAI_KEY = process.env.OPENAI_API_KEY;
+const PAGE_TOKEN = process.env.PAGE_ACCESS_TOKEN;
+const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "egboot_2026";
 
 app.post('/webhook', async (req, res) => {
     const body = req.body;
@@ -17,7 +17,7 @@ app.post('/webhook', async (req, res) => {
                 for (let event of entry.messaging) {
                     if (event.message && event.message.text) {
                         try {
-                            // نداء OpenAI
+                            // نداء ChatGPT
                             const gptRes = await axios.post('https://api.openai.com/v1/chat/completions', {
                                 model: "gpt-3.5-turbo",
                                 messages: [{ role: "user", content: event.message.text }]
@@ -33,7 +33,7 @@ app.post('/webhook', async (req, res) => {
                                 message: { text: aiReply }
                             });
                         } catch (e) {
-                            console.log("❌ Loop Error: " + (e.response ? JSON.stringify(e.response.data) : e.message));
+                            console.log("❌ Error: " + (e.response ? JSON.stringify(e.response.data) : e.message));
                         }
                     }
                 }
@@ -49,4 +49,4 @@ app.get('/webhook', (req, res) => {
     } else { res.send('Wrong Token'); }
 });
 
-app.listen(process.env.PORT || 8080, () => console.log('🚀 BOT DEPLOYED SUCCESSFULLY WITHOUT ERRORS'));
+app.listen(process.env.PORT || 8080, () => console.log('🚀 EG-BOOT ACTIVE AND SECURE'));
