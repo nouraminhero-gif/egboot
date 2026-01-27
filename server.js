@@ -1,54 +1,49 @@
 require('dotenv').config();
 const express = require('express');
 const axios = require('axios');
+const mongoose = require('mongoose');
 const app = express();
 app.use(express.json());
 
-// 1. قراءة المتغيرات من Railway (بدون trim لضمان عدم وجود أخطاء)
-const OPENAI_KEY = process.env.OPENAI_API_KEY;
-const PAGE_TOKEN = process.env.PAGE_ACCESS_TOKEN;
-const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "egboot_2026";
+// 1. الاتصال بقاعدة بيانات Egboot
+const DB_URI = "mongodb://nouraminhero:nour2010@ac-u6m8v7y-shard-00-00.mongodb.net:27017,ac-u6m8v7y-shard-00-02.mongodb.net:27017/egboot?ssl=true&replicaSet=atlas-13o8p5-shard-0&authSource=admin";
+mongoose.connect(DB_URI).then(() => console.log('✅ Connected to Egboot Database'));
+
+// 2. تعريف شكل الردود في الداتا بيز (عشان تقدر تطورها)
+const ReplySchema = new mongoose.Schema({
+    keyword: String, // الكلمة اللي العميل هيقولها (مثل: سعر، مقاس، شحن)
+    response: String // الرد اللي البوت هيقوله
+});
+const Reply = mongoose.model('Reply', ReplySchema, 'replies');
 
 app.post('/webhook', async (req, res) => {
     const body = req.body;
-
     if (body.object === 'page') {
         for (let entry of body.entry) {
             for (let event of (entry.messaging || [])) {
                 if (event.message && event.message.text) {
-                    const userText = event.message.text;
+                    const userText = event.message.text.toLowerCase();
                     const senderId = event.sender.id;
-                    console.log(`📩 رسالة من: ${senderId} - النص: ${userText}`);
 
                     try {
-                        let aiReply = "";
-
-                        // 2. محاولة الاتصال بـ OpenAI
-                        try {
-                            const gptRes = await axios.post('https://api.openai.com/v1/chat/completions', {
-                                model: "gpt-3.5-turbo",
-                                messages: [{ role: "user", content: userText }]
-                            }, {
-                                headers: { 'Authorization': `Bearer ${OPENAI_KEY}` },
-                                timeout: 5000 // ينتظر 5 ثواني فقط
-                            });
-                            aiReply = gptRes.data.choices[0].message.content;
-                        } catch (aiErr) {
-                            // لو فيه مشكلة في الرصيد (Quota) زي ما ظهر في الصور
-                            console.log("⚠️ OpenAI Error: " + (aiErr.response?.data?.error?.message || aiErr.message));
-                            aiReply = "أهلاً بك في Egboot! 🚀 السيرفر شغال والربط سليم، لكن يبدو أن هناك مشكلة في رصيد الذكاء الاصطناعي حالياً.";
+                        // 3. البحث الذكي في قاعدة بياناتك
+                        const match = await Reply.findOne({ keyword: { $regex: userText, $options: 'i' } });
+                        
+                        let finalReply = "";
+                        if (match) {
+                            finalReply = match.response; // الرد من تعبك ومجهودك في الداتا بيز
+                        } else {
+                            finalReply = "أهلاً بك في Egboot! 🚀 جاري تحويلك لأحد ممثلي خدمة العملاء للرد على استفسارك.";
                         }
 
-                        // 3. إرسال الرد للفيسبوك (سواء رد AI أو الرد التلقائي)
-                        await axios.post(`https://graph.facebook.com/v18.0/me/messages?access_token=${PAGE_TOKEN}`, {
+                        // 4. إرسال الرد للفيسبوك
+                        await axios.post(`https://graph.facebook.com/v18.0/me/messages?access_token=${process.env.PAGE_ACCESS_TOKEN}`, {
                             recipient: { id: senderId },
-                            message: { text: aiReply }
+                            message: { text: finalReply }
                         });
-                        console.log("✅ تم إرسال الرد للعميل بنجاح");
+                        console.log(`✅ Responded to "${userText}" from Database`);
 
-                    } catch (fbErr) {
-                        console.error("❌ Facebook API Error: ", fbErr.response?.data || fbErr.message);
-                    }
+                    } catch (err) { console.log("❌ Error:", err.message); }
                 }
             }
         }
@@ -56,12 +51,10 @@ app.post('/webhook', async (req, res) => {
     }
 });
 
-// تأكيد الـ Webhook
 app.get('/webhook', (req, res) => {
-    if (req.query['hub.verify_token'] === VERIFY_TOKEN) {
+    if (req.query['hub.verify_token'] === process.env.VERIFY_TOKEN) {
         res.send(req.query['hub.challenge']);
     } else { res.send('Wrong Token'); }
 });
 
-const PORT = process.env.PORT || 8080;
-app.listen(PORT, () => console.log(`🚀 EG-BOOT IS LIVE ON PORT ${PORT}`));
+app.listen(process.env.PORT || 8080, () => console.log('🚀 EGBOOT DATABASE-BOT IS READY'));
