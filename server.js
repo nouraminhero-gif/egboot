@@ -4,37 +4,50 @@ const axios = require('axios');
 const app = express();
 app.use(express.json());
 
-// قراءة المتغيرات مباشرة بدون أي عمليات تنظيف (trim) لمنع الـ Undefined Error
+// 1. قراءة المتغيرات من Railway (بدون trim لضمان عدم وجود أخطاء)
 const OPENAI_KEY = process.env.OPENAI_API_KEY;
 const PAGE_TOKEN = process.env.PAGE_ACCESS_TOKEN;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "egboot_2026";
 
 app.post('/webhook', async (req, res) => {
     const body = req.body;
+
     if (body.object === 'page') {
         for (let entry of body.entry) {
-            if (entry.messaging) {
-                for (let event of entry.messaging) {
-                    if (event.message && event.message.text) {
+            for (let event of (entry.messaging || [])) {
+                if (event.message && event.message.text) {
+                    const userText = event.message.text;
+                    const senderId = event.sender.id;
+                    console.log(`📩 رسالة من: ${senderId} - النص: ${userText}`);
+
+                    try {
+                        let aiReply = "";
+
+                        // 2. محاولة الاتصال بـ OpenAI
                         try {
-                            // نداء ChatGPT
                             const gptRes = await axios.post('https://api.openai.com/v1/chat/completions', {
                                 model: "gpt-3.5-turbo",
-                                messages: [{ role: "user", content: event.message.text }]
+                                messages: [{ role: "user", content: userText }]
                             }, {
-                                headers: { 'Authorization': `Bearer ${OPENAI_KEY}` }
+                                headers: { 'Authorization': `Bearer ${OPENAI_KEY}` },
+                                timeout: 5000 // ينتظر 5 ثواني فقط
                             });
-
-                            const aiReply = gptRes.data.choices[0].message.content;
-
-                            // رد الفيسبوك
-                            await axios.post(`https://graph.facebook.com/v18.0/me/messages?access_token=${PAGE_TOKEN}`, {
-                                recipient: { id: event.sender.id },
-                                message: { text: aiReply }
-                            });
-                        } catch (e) {
-                            console.log("❌ Error: " + (e.response ? JSON.stringify(e.response.data) : e.message));
+                            aiReply = gptRes.data.choices[0].message.content;
+                        } catch (aiErr) {
+                            // لو فيه مشكلة في الرصيد (Quota) زي ما ظهر في الصور
+                            console.log("⚠️ OpenAI Error: " + (aiErr.response?.data?.error?.message || aiErr.message));
+                            aiReply = "أهلاً بك في Egboot! 🚀 السيرفر شغال والربط سليم، لكن يبدو أن هناك مشكلة في رصيد الذكاء الاصطناعي حالياً.";
                         }
+
+                        // 3. إرسال الرد للفيسبوك (سواء رد AI أو الرد التلقائي)
+                        await axios.post(`https://graph.facebook.com/v18.0/me/messages?access_token=${PAGE_TOKEN}`, {
+                            recipient: { id: senderId },
+                            message: { text: aiReply }
+                        });
+                        console.log("✅ تم إرسال الرد للعميل بنجاح");
+
+                    } catch (fbErr) {
+                        console.error("❌ Facebook API Error: ", fbErr.response?.data || fbErr.message);
                     }
                 }
             }
@@ -43,10 +56,12 @@ app.post('/webhook', async (req, res) => {
     }
 });
 
+// تأكيد الـ Webhook
 app.get('/webhook', (req, res) => {
     if (req.query['hub.verify_token'] === VERIFY_TOKEN) {
         res.send(req.query['hub.challenge']);
     } else { res.send('Wrong Token'); }
 });
 
-app.listen(process.env.PORT || 8080, () => console.log('🚀 EG-BOOT ACTIVE AND SECURE'));
+const PORT = process.env.PORT || 8080;
+app.listen(PORT, () => console.log(`🚀 EG-BOOT IS LIVE ON PORT ${PORT}`));
