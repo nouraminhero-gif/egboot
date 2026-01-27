@@ -1,16 +1,13 @@
 require('dotenv').config();
 const express = require('express');
 const axios = require('axios');
-const mongoose = require('mongoose');
-
 const app = express();
 app.use(express.json());
 
-// الاتصال بـ MongoDB - مع تجاهل الأخطاء تماماً
-mongoose.connect("mongodb://nouraminhero:nour2010@ac-u6m8v7y-shard-00-00.mongodb.net:27017,ac-u6m8v7y-shard-00-01.mongodb.net:27017,ac-u6m8v7y-shard-00-02.mongodb.net:27017/egboot?ssl=true&replicaSet=atlas-13o8p5-shard-0&authSource=admin", {
-    serverSelectionTimeoutMS: 2000
-}).then(() => console.log('✅ DB Connected'))
-  .catch(err => console.log('⚠️ DB Connection ignored to keep server alive'));
+// 1. تعريف المتغيرات مع حماية ضد الـ Undefined (عشان نخلص من خطأ الـ trim)
+const OPENAI_KEY = (process.env.OPENAI_API_KEY || "").trim();
+const PAGE_TOKEN = (process.env.PAGE_ACCESS_TOKEN || "").trim();
+const VERIFY_TOKEN = (process.env.VERIFY_TOKEN || "egboot_2026").trim();
 
 app.post('/webhook', async (req, res) => {
     const body = req.body;
@@ -20,23 +17,23 @@ app.post('/webhook', async (req, res) => {
                 for (let event of entry.messaging) {
                     if (event.message && event.message.text) {
                         try {
-                            // نداء OpenAI بدون استخدام .trim() نهائياً
-                            const response = await axios.post('https://api.openai.com/v1/chat/completions', {
+                            // نداء OpenAI
+                            const gptRes = await axios.post('https://api.openai.com/v1/chat/completions', {
                                 model: "gpt-3.5-turbo",
                                 messages: [{ role: "user", content: event.message.text }]
                             }, {
-                                headers: { 'Authorization': `Bearer ${process.env.OPENAI_API_KEY}` }
+                                headers: { 'Authorization': `Bearer ${OPENAI_KEY}` }
                             });
 
-                            const reply = response.data.choices[0].message.content;
+                            const aiReply = gptRes.data.choices[0].message.content;
 
-                            // إرسال الرد لفيسبوك بدون .trim() نهائياً
-                            await axios.post(`https://graph.facebook.com/v18.0/me/messages?access_token=${process.env.PAGE_ACCESS_TOKEN}`, {
+                            // رد الفيسبوك
+                            await axios.post(`https://graph.facebook.com/v18.0/me/messages?access_token=${PAGE_TOKEN}`, {
                                 recipient: { id: event.sender.id },
-                                message: { text: reply }
+                                message: { text: aiReply }
                             });
-                        } catch (e) { 
-                            console.log("❌ Error occurred: " + (e.response ? JSON.stringify(e.response.data) : e.message)); 
+                        } catch (e) {
+                            console.log("❌ Loop Error: " + (e.response ? JSON.stringify(e.response.data) : e.message));
                         }
                     }
                 }
@@ -47,9 +44,9 @@ app.post('/webhook', async (req, res) => {
 });
 
 app.get('/webhook', (req, res) => {
-    if (req.query['hub.verify_token'] === process.env.VERIFY_TOKEN) {
+    if (req.query['hub.verify_token'] === VERIFY_TOKEN) {
         res.send(req.query['hub.challenge']);
     } else { res.send('Wrong Token'); }
 });
 
-app.listen(process.env.PORT || 8080, () => console.log('🚀 SERVER IS RUNNING WITHOUT TRIM'));
+app.listen(process.env.PORT || 8080, () => console.log('🚀 BOT DEPLOYED SUCCESSFULLY WITHOUT ERRORS'));
