@@ -6,8 +6,8 @@ const app = express();
 app.use(express.json());
 
 app.post('/webhook', async (req, res) => {
-    // أهم سطر: بنرد على فيسبوك في أقل من ثانية عشان نوقف التكرار
-    res.status(200).send('EVENT_RECEIVED'); 
+    // الرد الفوري لمنع تكرار فيسبوك
+    res.status(200).send('EVENT_RECEIVED');
 
     const body = req.body;
     if (body.object === 'page') {
@@ -18,24 +18,27 @@ app.post('/webhook', async (req, res) => {
             const sender_psid = messaging.sender.id;
             const userMessage = messaging.message.text;
 
-            // بنشغل الذكاء في الخلفية
             try {
+                // استدعاء Gemini الذكي
                 const aiResponse = await askAI(sender_psid, userMessage);
+                
                 await axios.post(`https://graph.facebook.com/v18.0/me/messages?access_token=${process.env.PAGE_ACCESS_TOKEN}`, {
                     recipient: { id: sender_psid },
                     message: { text: aiResponse }
                 });
             } catch (e) {
-                console.error("Error sending message");
+                console.error("خطأ في الإرسال:", e.message);
             }
         }
     }
 });
 
 app.get('/webhook', (req, res) => {
-    if (req.query['hub.verify_token'] === "egboot_token_2026") {
+    const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "egboot_token_2026";
+    if (req.query['hub.verify_token'] === VERIFY_TOKEN) {
         res.status(200).send(req.query['hub.challenge']);
     }
 });
 
-app.listen(process.env.PORT || 8080);
+const PORT = process.env.PORT || 8080;
+app.listen(PORT, () => console.log(`Egboot Server is running on port ${PORT}`));
