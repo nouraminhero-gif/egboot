@@ -1,25 +1,26 @@
 import fs from 'fs';
 
-// دالة لحفظ "خبرة" جديدة بعد كل محادثة
-export function updateExperience(userId, situation, result) {
-    const dbPath = './sales_logic.json';
-    let data = JSON.parse(fs.readFileSync(dbPath, 'utf8') || "[]");
+const LOGIC_DB = './sales_logic.json';
 
-    // إضافة الموقف الجديد للذاكرة
+// وظيفة لحفظ كل حركة بيع عشان الذكاء يذاكرها
+export function saveSaleExperience(userId, message, response) {
+    let data = [];
+    if (fs.existsSync(LOGIC_DB)) {
+        data = JSON.parse(fs.readFileSync(LOGIC_DB, 'utf8') || "[]");
+    }
     data.push({
-        timestamp: new Date(),
-        userId: userId,
-        situation: situation, // (مثلاً: العميل قال "احا غالي")
-        result: result        // (الرد اللي جاب نتيجة)
+        time: new Date().toLocaleString('en-EG'),
+        customer: userId,
+        input: message,
+        output: response
     });
-
-    // حفظ التحديث محلياً
-    fs.writeFileSync(dbPath, JSON.stringify(data, null, 2));
+    // حفظ الداتا في ملفك على السيرفر مباشرة
+    fs.writeFileSync(LOGIC_DB, JSON.stringify(data, null, 2));
 }
 
-// دالة لجلب "الدروس المستفادة" عشان الـ AI يذاكرها
-export function getLessons() {
-    const data = JSON.parse(fs.readFileSync('./sales_logic.json', 'utf8') || "[]");
-    // بنرجع آخر 5 مواقف ناجحة عشان الـ AI يتعلم منهم
-    return data.slice(-5).map(d => `موقف: ${d.situation} -> النتيجة: ${d.result}`).join('\n');
+// وظيفة لجلب "الخبرات السابقة" عشان الـ AI يطور نفسه
+export function getPastExperiences() {
+    if (!fs.existsSync(LOGIC_DB)) return "لا توجد خبرات سابقة.";
+    const data = JSON.parse(fs.readFileSync(LOGIC_DB, 'utf8') || "[]");
+    return data.slice(-10).map(d => `الزبون قال: ${d.input} -> الرد الناجح كان: ${d.output}`).join('\n');
 }
