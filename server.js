@@ -7,12 +7,13 @@ const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// ✅ الرابط المباشر (Direct) لكسر مشكلة الـ Tenant ID (bznvximwimyguinpduzb)
+// ✅ الرابط المباشر (Direct) - ده اللي هيحل مشكلة "Tenant not found" نهائياً
+// المشروع: bznvximwimyguinpduzb
 const connectionString = "postgresql://postgres:Xj5J@9c8w!Wp$8K@db.bznvximwimyguinpduzb.supabase.co:5432/postgres";
 
 const client = new Client({ 
     connectionString,
-    connectionTimeoutMillis: 10000 
+    connectionTimeoutMillis: 15000 
 });
 
 client.connect()
@@ -21,7 +22,7 @@ client.connect()
         client.query('CREATE TABLE IF NOT EXISTS replies (keyword TEXT PRIMARY KEY, response TEXT)');
     })
     .catch(err => {
-        console.error('❌ Connection Error:', err.message);
+        console.error('❌ DB Error:', err.message);
     });
 
 // --- [ واجهة لوحة التحكم ] ---
@@ -45,7 +46,7 @@ app.get('/admin', async (req, res) => {
                     .card { max-width: 600px; margin: auto; background: white; padding: 25px; border-radius: 15px; box-shadow: 0 4px 10px rgba(0,0,0,0.1); }
                     h2 { text-align: center; color: #007bff; }
                     input, textarea { width: 100%; padding: 12px; margin: 10px 0; border: 1px solid #ddd; border-radius: 8px; box-sizing: border-box; }
-                    button { width: 100%; padding: 12px; background: #28a745; color: white; border: none; border-radius: 8px; cursor: pointer; font-size: 16px; }
+                    button { width: 100%; padding: 12px; background: #28a745; color: white; border: none; border-radius: 8px; cursor: pointer; font-size: 16px; font-weight: bold; }
                     table { width: 100%; margin-top: 25px; border-collapse: collapse; }
                     th { background: #007bff; color: white; padding: 12px; text-align: right; }
                     td { padding: 12px; }
@@ -55,20 +56,20 @@ app.get('/admin', async (req, res) => {
                 <div class="card">
                     <h2>🚀 لوحة إدارة Egboot</h2>
                     <form action="/admin/add" method="POST">
-                        <input name="keyword" placeholder="الكلمة المفتاحية" required>
-                        <textarea name="response" placeholder="رد البوت التلقائي..." rows="3" required></textarea>
+                        <input name="keyword" placeholder="الكلمة (مثلاً: سعر)" required>
+                        <textarea name="response" placeholder="رد البوت..." rows="3" required></textarea>
                         <button type="submit">حفظ الرد</button>
                     </form>
                     <table>
                         <thead><tr><th>الكلمة</th><th>الرد</th></tr></thead>
-                        <tbody>${rows || '<tr><td colspan="2" style="text-align:center; padding:20px;">لا يوجد بيانات.</td></tr>'}</tbody>
+                        <tbody>${rows || '<tr><td colspan="2" style="text-align:center;">لا يوجد ردود مضافة.</td></tr>'}</tbody>
                     </table>
                 </div>
             </body>
             </html>
         `);
     } catch (e) {
-        res.status(500).send("⚠️ خطأ في الداتا بيز: " + e.message);
+        res.status(500).send("خطأ في الاتصال: " + e.message);
     }
 });
 
@@ -80,7 +81,7 @@ app.post('/admin/add', async (req, res) => {
             [keyword.toLowerCase().trim(), response]
         );
         res.redirect('/admin');
-    } catch (e) { res.status(500).send("❌ خطأ أثناء الحفظ: " + e.message); }
+    } catch (e) { res.status(500).send("خطأ: " + e.message); }
 });
 
 // --- [ Webhook ] ---
@@ -109,4 +110,4 @@ app.post('/webhook', async (req, res) => {
 app.get('/webhook', (req, res) => { res.send(req.query['hub.challenge']); });
 
 const PORT = process.env.PORT || 8080;
-app.listen(PORT, () => console.log('🚀 Server Live on Port ' + PORT));
+app.listen(PORT, () => console.log('🚀 Server is Live on Port ' + PORT));
