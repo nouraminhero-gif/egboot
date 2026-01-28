@@ -6,22 +6,27 @@ const app = express();
 app.use(express.json());
 
 app.post('/webhook', async (req, res) => {
-    // 1. رد فوراً على فيسبوك عشان نوقف التكرار (أهم خطوة)
+    // أهم سطر: بنرد على فيسبوك في أقل من ثانية عشان نوقف التكرار
     res.status(200).send('EVENT_RECEIVED'); 
 
     const body = req.body;
     if (body.object === 'page') {
-        for (const entry of body.entry) {
-            const webhook_event = entry.messaging[0];
-            if (webhook_event.message && webhook_event.message.text) {
-                const sender_psid = webhook_event.sender.id;
-                // 2. شغل الذكاء
-                const aiReply = await askAI(sender_psid, webhook_event.message.text);
-                // 3. ابعت الرد
+        const entry = body.entry[0];
+        const messaging = entry.messaging[0];
+        
+        if (messaging && messaging.message && messaging.message.text) {
+            const sender_psid = messaging.sender.id;
+            const userMessage = messaging.message.text;
+
+            // بنشغل الذكاء في الخلفية
+            try {
+                const aiResponse = await askAI(sender_psid, userMessage);
                 await axios.post(`https://graph.facebook.com/v18.0/me/messages?access_token=${process.env.PAGE_ACCESS_TOKEN}`, {
                     recipient: { id: sender_psid },
-                    message: { text: aiReply }
-                }).catch(e => console.log("FB Error"));
+                    message: { text: aiResponse }
+                });
+            } catch (e) {
+                console.error("Error sending message");
             }
         }
     }
