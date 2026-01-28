@@ -1,7 +1,6 @@
 {
-  "name": "egboot-server",
+  "name": "egboot",
   "version": "1.0.0",
-  "description": "Egboot Engine with Supabase",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
@@ -13,3 +12,4 @@
     "pg": "^8.11.0"
   }
 }
+ 
