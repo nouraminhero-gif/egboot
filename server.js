@@ -7,9 +7,9 @@ const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// ✅ الرابط المباشر (Direct) - ده اللي هيحل مشكلة "Tenant not found" نهائياً
-// المشروع: bznvximwimyguinpduzb
-const connectionString = "postgresql://postgres:Xj5J@9c8w!Wp$8K@db.bznvximwimyguinpduzb.supabase.co:5432/postgres";
+// ✅ الرابط الرسمي المستخرج من بيانات مشروعك bznvximwimyguinpduzb
+// تم استخدام المنفذ 6543 المخصص للـ Connection Pooling
+const connectionString = "postgresql://postgres.bznvximwimyguinpduzb:Xj5J@9c8w!Wp$8K@aws-0-eu-central-1.pooler.supabase.com:6543/postgres";
 
 const client = new Client({ 
     connectionString,
@@ -44,7 +44,7 @@ app.get('/admin', async (req, res) => {
                 <style>
                     body { font-family: sans-serif; background: #f4f7f6; padding: 20px; }
                     .card { max-width: 600px; margin: auto; background: white; padding: 25px; border-radius: 15px; box-shadow: 0 4px 10px rgba(0,0,0,0.1); }
-                    h2 { text-align: center; color: #007bff; }
+                    h2 { text-align: center; color: #007bff; margin-top:0; }
                     input, textarea { width: 100%; padding: 12px; margin: 10px 0; border: 1px solid #ddd; border-radius: 8px; box-sizing: border-box; }
                     button { width: 100%; padding: 12px; background: #28a745; color: white; border: none; border-radius: 8px; cursor: pointer; font-size: 16px; font-weight: bold; }
                     table { width: 100%; margin-top: 25px; border-collapse: collapse; }
@@ -56,20 +56,20 @@ app.get('/admin', async (req, res) => {
                 <div class="card">
                     <h2>🚀 لوحة إدارة Egboot</h2>
                     <form action="/admin/add" method="POST">
-                        <input name="keyword" placeholder="الكلمة (مثلاً: سعر)" required>
-                        <textarea name="response" placeholder="رد البوت..." rows="3" required></textarea>
+                        <input name="keyword" placeholder="الكلمة (مثل: سعر)" required>
+                        <textarea name="response" placeholder="رد البوت التلقائي..." rows="3" required></textarea>
                         <button type="submit">حفظ الرد</button>
                     </form>
                     <table>
                         <thead><tr><th>الكلمة</th><th>الرد</th></tr></thead>
-                        <tbody>${rows || '<tr><td colspan="2" style="text-align:center;">لا يوجد ردود مضافة.</td></tr>'}</tbody>
+                        <tbody>${rows || '<tr><td colspan="2" style="text-align:center; padding:20px;">لا يوجد بيانات.</td></tr>'}</tbody>
                     </table>
                 </div>
             </body>
             </html>
         `);
     } catch (e) {
-        res.status(500).send("خطأ في الاتصال: " + e.message);
+        res.status(500).send("خطأ في قاعدة البيانات: " + e.message);
     }
 });
 
@@ -84,7 +84,7 @@ app.post('/admin/add', async (req, res) => {
     } catch (e) { res.status(500).send("خطأ: " + e.message); }
 });
 
-// --- [ Webhook ] ---
+// --- [ Webhook للفيسبوك ] ---
 app.post('/webhook', async (req, res) => {
     const body = req.body;
     if (body.object === 'page') {
@@ -94,12 +94,12 @@ app.post('/webhook', async (req, res) => {
                     const userText = event.message.text.toLowerCase().trim();
                     try {
                         const result = await client.query('SELECT response FROM replies WHERE keyword = $1', [userText]);
-                        let replyText = result.rows.length > 0 ? result.rows[0].response : "أهلاً بك!";
+                        let replyText = result.rows.length > 0 ? result.rows[0].response : "أهلاً بك في Egboot! 🚀";
                         await axios.post('https://graph.facebook.com/v18.0/me/messages?access_token=' + process.env.PAGE_ACCESS_TOKEN, {
                             recipient: { id: event.sender.id },
                             message: { text: replyText }
                         });
-                    } catch (e) { console.error("FB Error"); }
+                    } catch (e) { console.error("FB Send Error"); }
                 }
             }
         }
@@ -110,4 +110,4 @@ app.post('/webhook', async (req, res) => {
 app.get('/webhook', (req, res) => { res.send(req.query['hub.challenge']); });
 
 const PORT = process.env.PORT || 8080;
-app.listen(PORT, () => console.log('🚀 Server is Live on Port ' + PORT));
+app.listen(PORT, () => console.log('🚀 Egboot Live on Port ' + PORT));
