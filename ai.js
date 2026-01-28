@@ -1,33 +1,24 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
-import { getPastExperiences, saveSaleExperience } from "./db_handler.js";
+import { getKnowledge, saveExperience } from "./db_handler.js";
 
 const genAI = new GoogleGenerativeAI("AIzaSyDt_0jph7Stg6GBG22fihPwkSptZ1nOdMU");
 
-export async function askAI(userId, userMessage) {
-    const memory = getPastExperiences(); // جلب الخبرة المحلية
-
+export async function askAI(userId, message) {
+    const memory = getKnowledge(); // مذاكرة الدروس السابقة
     const model = genAI.getGenerativeModel({ 
         model: "gemini-1.5-flash",
-        systemInstruction: `أنت بياع Egboot، لست مجرد بوت رد آلي. 
-        مهمتك: البيع، الإقناع، والتعلم.
-        خبراتك السابقة من الـ Database الخاصة بك:\n${memory}
-        
+        systemInstruction: `أنت بياع Egboot الذكي. تعلم من المواقف دي:\n${memory}
         قواعدك:
-        1. لو الزبون شتم أو اعترض، امتص غضبه بذكاء بياع مصري "حريف" (ممنوع التكرار).
-        2. الوزن والمقاس: احسب المقاس بذكاء (60-70kg: M, 70-80kg: L, 80-90kg: XL, 90-105kg: 2XL).
-        3. الهدف: جمع (الاسم، العنوان، التليفون) لعمل الأوردر.
-        4. الختام: دائماً اسأل سؤالاً (CTA) يدفع الزبون للخطوة التالية.`
+        - بيع بذكاء ولهجة مصرية.
+        - لو الزبون اعترض أو شتم، امتص غضبه بأسلوب جديد (ممنوع التكرار).
+        - احسب المقاسات: (60-70kg: M, 70-80kg: L, 80-90kg: XL, 90-105kg: 2XL).
+        - اطلب الاسم والتليفون والعنوان لقفل الأوردر.`
     });
 
     try {
-        const result = await model.generateContent(userMessage);
+        const result = await model.generateContent(message);
         const reply = result.response.text();
-        
-        // حفظ الموقف فوراً في الذاكرة لتطوير الذكاء
-        saveSaleExperience(userId, userMessage, reply);
-        
+        saveExperience(userId, message, reply); // تطوير الذات فوراً
         return reply;
-    } catch (err) {
-        return "منور يا بطل في Egboot، ابعت سؤالك تاني والشبكة هتضبط.";
-    }
+    } catch (e) { return "معاك يا فندم، اؤمرني أساعدك إزاي؟"; }
 }
