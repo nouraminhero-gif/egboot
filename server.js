@@ -8,23 +8,16 @@ app.use(express.json());
 app.post('/webhook', async (req, res) => {
     const entry = req.body.entry;
     if (entry && entry[0].messaging) {
-        const msgEvent = entry[0].messaging[0];
-        const senderId = msgEvent.sender.id;
-
-        if (msgEvent.message && msgEvent.message.text) {
-            const userText = msgEvent.message.text;
-            
-            // تشغيل العقل البياع
-            const aiReply = await askAI(senderId, userText);
-
-            // إرسال الرد للعميل
+        const { sender, message } = entry[0].messaging[0];
+        if (message && message.text) {
+            const reply = await askAI(sender.id, message.text);
             await axios.post(`https://graph.facebook.com/v18.0/me/messages?access_token=${process.env.PAGE_ACCESS_TOKEN}`, {
-                recipient: { id: senderId },
-                message: { text: aiReply }
-            }).catch(e => console.log("FB Error"));
+                recipient: { id: sender.id },
+                message: { text: reply }
+            }).catch(err => console.log("Error FB Send"));
         }
     }
     res.sendStatus(200);
 });
 
-app.listen(process.env.PORT || 8080, () => console.log("Egboot AI System Live!"));
+app.listen(process.env.PORT || 8080);
