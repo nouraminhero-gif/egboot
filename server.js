@@ -7,8 +7,8 @@ const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// الرابط المصلح بناءً على صورك (ID: bznvximwimyguinpduzb) لكسر الدائرة المغلقة
-const connectionString = "postgresql://postgres.bznvximwimyguinpduzb:Xj5J@9c8w!Wp$8K@aws-0-eu-central-1.pooler.supabase.com:6543/postgres?sslmode=disable";
+// ✅ الرابط المباشر (Direct) لكسر مشكلة الـ Tenant ID (bznvximwimyguinpduzb)
+const connectionString = "postgresql://postgres:Xj5J@9c8w!Wp$8K@db.bznvximwimyguinpduzb.supabase.co:5432/postgres";
 
 const client = new Client({ 
     connectionString,
@@ -18,7 +18,6 @@ const client = new Client({
 client.connect()
     .then(() => {
         console.log('✅ Connected to Egboot DB Successfully');
-        // إنشاء الجدول لو مش موجود
         client.query('CREATE TABLE IF NOT EXISTS replies (keyword TEXT PRIMARY KEY, response TEXT)');
     })
     .catch(err => {
@@ -56,15 +55,13 @@ app.get('/admin', async (req, res) => {
                 <div class="card">
                     <h2>🚀 لوحة إدارة Egboot</h2>
                     <form action="/admin/add" method="POST">
-                        <input name="keyword" placeholder="الكلمة المفتاحية (مثلاً: سعر)" required>
+                        <input name="keyword" placeholder="الكلمة المفتاحية" required>
                         <textarea name="response" placeholder="رد البوت التلقائي..." rows="3" required></textarea>
                         <button type="submit">حفظ الرد</button>
                     </form>
                     <table>
                         <thead><tr><th>الكلمة</th><th>الرد</th></tr></thead>
-                        <tbody>
-                            ${rows || '<tr><td colspan="2" style="text-align:center; padding:20px;">لا يوجد بيانات حالياً.</td></tr>'}
-                        </tbody>
+                        <tbody>${rows || '<tr><td colspan="2" style="text-align:center; padding:20px;">لا يوجد بيانات.</td></tr>'}</tbody>
                     </table>
                 </div>
             </body>
@@ -75,7 +72,6 @@ app.get('/admin', async (req, res) => {
     }
 });
 
-// إضافة الردود
 app.post('/admin/add', async (req, res) => {
     const { keyword, response } = req.body;
     try {
@@ -84,12 +80,10 @@ app.post('/admin/add', async (req, res) => {
             [keyword.toLowerCase().trim(), response]
         );
         res.redirect('/admin');
-    } catch (e) {
-        res.status(500).send("❌ خطأ أثناء الحفظ: " + e.message);
-    }
+    } catch (e) { res.status(500).send("❌ خطأ أثناء الحفظ: " + e.message); }
 });
 
-// --- [ Webhook للفيسبوك ] ---
+// --- [ Webhook ] ---
 app.post('/webhook', async (req, res) => {
     const body = req.body;
     if (body.object === 'page') {
@@ -99,15 +93,12 @@ app.post('/webhook', async (req, res) => {
                     const userText = event.message.text.toLowerCase().trim();
                     try {
                         const result = await client.query('SELECT response FROM replies WHERE keyword = $1', [userText]);
-                        let replyText = result.rows.length > 0 ? result.rows[0].response : "أهلاً بك في Egboot! 🚀";
-                        
+                        let replyText = result.rows.length > 0 ? result.rows[0].response : "أهلاً بك!";
                         await axios.post('https://graph.facebook.com/v18.0/me/messages?access_token=' + process.env.PAGE_ACCESS_TOKEN, {
                             recipient: { id: event.sender.id },
                             message: { text: replyText }
                         });
-                    } catch (e) { 
-                        console.error("FB Send Error"); 
-                    }
+                    } catch (e) { console.error("FB Error"); }
                 }
             }
         }
@@ -115,9 +106,7 @@ app.post('/webhook', async (req, res) => {
     }
 });
 
-app.get('/webhook', (req, res) => {
-    res.send(req.query['hub.challenge']);
-});
+app.get('/webhook', (req, res) => { res.send(req.query['hub.challenge']); });
 
 const PORT = process.env.PORT || 8080;
-app.listen(PORT, () => console.log('🚀 Server is Live on Port ' + PORT));
+app.listen(PORT, () => console.log('🚀 Server Live on Port ' + PORT));
