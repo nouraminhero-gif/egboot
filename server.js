@@ -9,7 +9,6 @@ app.use(express.urlencoded({ extended: true }));
 
 const KNOWLEDGE_FILE = './egboot_knowledge.txt';
 
-// دالة لجلب الشرح من السبورة
 const getKnowledge = () => {
     try {
         if (fs.existsSync(KNOWLEDGE_FILE)) return fs.readFileSync(KNOWLEDGE_FILE, 'utf8');
@@ -17,22 +16,26 @@ const getKnowledge = () => {
     return "";
 };
 
-// --- [ محرك الذكاء الداخلي - البحث بالتشابه المنطقي ] ---
+// --- [ محرك الردود الذكي والمختصر ] ---
 function findSmartResponse(userMsg, knowledge) {
     const msg = userMsg.toLowerCase().trim();
     const lines = knowledge.split('\n').filter(line => line.trim().length > 5);
     
-    let bestMatch = null;
+    let greeting = "";
+    // 1. التحقق من وجود سلام
+    if (msg.includes("سلام") || msg.includes("عليكم") || msg.includes("أهلاً") || msg.includes("صباح") || msg.includes("مساء")) {
+        greeting = "وعليكم السلام يا فندم، نورت Egboot! 👔 ";
+    }
+
+    // 2. البحث عن إجابة محددة (على قد السؤال)
+    let bestMatch = "";
     let highestScore = 0;
 
     for (let line of lines) {
         let score = 0;
-        const words = msg.split(' ');
-        
-        // بيحسب "درجة الذكاء" بناءً على توافق الكلمات ومعناها القريب
-        words.forEach(word => {
-            if (line.toLowerCase().includes(word)) score += 10; // كلمة مطابقة
-            if (word.length > 3 && line.toLowerCase().includes(word.substring(0, 4))) score += 5; // جزء من كلمة
+        const keywords = msg.split(' ');
+        keywords.forEach(word => {
+            if (word.length > 2 && line.toLowerCase().includes(word)) score += 10;
         });
 
         if (score > highestScore) {
@@ -41,41 +44,38 @@ function findSmartResponse(userMsg, knowledge) {
         }
     }
 
-    // لو ملقاش تشابه عالي، بيحلل "نية" الزبون (Intent)
-    if (highestScore < 10) {
-        if (msg.includes("سعر") || msg.includes("كام") || msg.includes("بكم") || msg.includes("قيمة")) 
-            return "بالنسبة للأسعار في Egboot، التيشيرت بـ 250 والقميص بـ 450 جنيه يا فندم. تحب أحجزلك حاجة؟";
-        if (msg.includes("مقاس") || msg.includes("لبس") || msg.includes("مقاسي"))
-            return "عندنا مقاسات من M لـ 3XL، لو قلتلي طولك ووزنك هعرف مقاسك فوراً.";
-        return "أهلاً بك في Egboot! 👔 أنا مساعدك الذكي، تقدر تسألني عن الأسعار، المقاسات، أو أماكن الشحن وهرد عليك من خبرتي بالمحل.";
+    // لو لقى إجابة دقيقة، يرجعها مع السلام
+    if (highestScore > 0) {
+        return greeting + bestMatch;
     }
 
-    return bestMatch; // بيرجع السطر الأكثر ذكاءً وتوافقاً من "السبورة"
+    // لو مفيش إجابة بس فيه سلام
+    if (greeting !== "") return greeting + "أؤمرني يا فندم، محتاج تعرف إيه عن موديلاتنا؟";
+
+    // الرد الافتراضي المختصر
+    return "أهلاً بك في Egboot! محتاج تعرف الأسعار ولا المقاسات المتاحة؟";
 }
 
-// --- [ لوحة الإدارة ] ---
+// --- [ باقي الكود (الأدمن والويب هوك) ] ---
 app.get('/admin', (req, res) => {
     const currentData = getKnowledge();
-    res.send(`
-        <html dir="rtl"><body style="font-family:sans-serif; background:#f4f7f6; padding:20px;">
-            <div style="max-width:800px; margin:auto; background:white; padding:25px; border-radius:15px; box-shadow:0 4px 15px rgba(0,0,0,0.1);">
-                <h2 style="color:#007bff; text-align:center;">🧠 تطوير "عقل" Egboot الداخلي</h2>
-                <p style="color:#666;">اكتب المعلومات في سطور واضحة. كل سطر بيمثل "معلومة" البوت هيفهمها ويستخدمها.</p>
-                <form action="/admin/save" method="POST">
-                    <textarea name="content" style="width:100%; height:400px; padding:15px; border-radius:10px; border:1px solid #ccc; font-size:16px;">${currentData}</textarea>
-                    <button type="submit" style="width:100%; padding:15px; background:#28a745; color:white; border:none; border-radius:10px; cursor:pointer; font-weight:bold; margin-top:10px;">تحديث ذاكرة البوت</button>
-                </form>
-            </div>
-        </body></html>
-    `);
+    res.send(`<html dir="rtl"><body style="font-family:sans-serif; padding:20px; background:#f4f7f6;">
+        <div style="max-width:800px; margin:auto; background:white; padding:25px; border-radius:15px; box-shadow:0 4px 15px rgba(0,0,0,0.1);">
+            <h2 style="color:#007bff; text-align:center;">🧠 تطوير ردود Egboot</h2>
+            <p style="color:#666;">نصيحة: اكتب كل معلومة في سطر مستقل (مثلاً: سطر للسعر، سطر للشحن).</p>
+            <form action="/admin/save" method="POST">
+                <textarea name="content" style="width:100%; height:400px; padding:15px; font-size:16px;">${currentData}</textarea>
+                <button type="submit" style="width:100%; padding:15px; background:#28a745; color:white; border:none; border-radius:10px; cursor:pointer; font-weight:bold; margin-top:10px;">حفظ وتدريب</button>
+            </form>
+        </div>
+    </body></html>`);
 });
 
 app.post('/admin/save', (req, res) => {
     fs.writeFileSync(KNOWLEDGE_FILE, req.body.content);
-    res.send('<script>alert("تم تحديث الذكاء!"); window.location.href="/admin";</script>');
+    res.send('<script>alert("تم التحديث!"); window.location.href="/admin";</script>');
 });
 
-// --- [ استقبال رسائل فيسبوك ] ---
 app.post('/webhook', async (req, res) => {
     const body = req.body;
     if (body.object === 'page') {
@@ -84,7 +84,6 @@ app.post('/webhook', async (req, res) => {
                 if (event.message && event.message.text) {
                     const userMsg = event.message.text;
                     const knowledge = getKnowledge();
-                    
                     const reply = findSmartResponse(userMsg, knowledge);
 
                     try {
@@ -92,7 +91,7 @@ app.post('/webhook', async (req, res) => {
                             recipient: { id: event.sender.id },
                             message: { text: reply }
                         });
-                    } catch (e) { console.error("FB API Error"); }
+                    } catch (e) { console.error("FB Error"); }
                 }
             }
         }
@@ -101,6 +100,4 @@ app.post('/webhook', async (req, res) => {
 });
 
 app.get('/webhook', (req, res) => res.send(req.query['hub.challenge']));
-
-const PORT = process.env.PORT || 8080;
-app.listen(PORT, () => console.log('🚀 Egboot Internal AI is Live!'));
+app.listen(process.env.PORT || 8080);
