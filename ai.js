@@ -1,14 +1,21 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
 
-// بيقرأ المفتاح من Variables اللي في الصورة
+// السطر ده هو السر.. لازم يقرأ GEMINI_API_KEY من Railway
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
 export async function askAI(userId, message) {
     try {
-        const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
-        const result = await model.generateContent(`أنت بياع مصري في براند Egboot. رد باختصار: ${message}`);
-        return result.response.text();
+        const model = genAI.getGenerativeModel({ 
+            model: "gemini-1.5-flash",
+            systemInstruction: "أنت بياع شاطر في براند ملابس Egboot، رد بلهجة مصرية قصيرة وجذابة."
+        });
+
+        const result = await model.generateContent(message);
+        const response = await result.response;
+        return response.text();
     } catch (error) {
-        return "ثواني والشبكة تضبط يا بطل.. اؤمرني محتاج مقاس إيه؟";
+        console.error("AI Error:", error);
+        // غيرنا الجملة هنا عشان نتأكد إن التعديل سمع
+        return "منورنا في Egboot يا بطل! ثواني والشبكة تضبط وأرد عليك بكل التفاصيل."; 
     }
 }
