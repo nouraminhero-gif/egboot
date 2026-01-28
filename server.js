@@ -7,88 +7,92 @@ const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// مسار ملف "السبورة" اللي بيخزن الشرح الكبير
 const KNOWLEDGE_FILE = './egboot_knowledge.txt';
 
-// دالة لجلب المعلومات من السبورة
+// دالة لجلب الشرح من السبورة
 const getKnowledge = () => {
     try {
-        if (fs.existsSync(KNOWLEDGE_FILE)) {
-            return fs.readFileSync(KNOWLEDGE_FILE, 'utf8');
-        }
-    } catch (e) { console.error("Error reading knowledge file"); }
-    return "أهلاً بك في Egboot! نحن متخصصون في أرقى الملابس الرجالي.";
+        if (fs.existsSync(KNOWLEDGE_FILE)) return fs.readFileSync(KNOWLEDGE_FILE, 'utf8');
+    } catch (e) { return ""; }
+    return "";
 };
 
-// --- [ 1. لوحة الإدارة (السبورة) ] ---
+// --- [ محرك الذكاء الداخلي - البحث بالتشابه المنطقي ] ---
+function findSmartResponse(userMsg, knowledge) {
+    const msg = userMsg.toLowerCase().trim();
+    const lines = knowledge.split('\n').filter(line => line.trim().length > 5);
+    
+    let bestMatch = null;
+    let highestScore = 0;
+
+    for (let line of lines) {
+        let score = 0;
+        const words = msg.split(' ');
+        
+        // بيحسب "درجة الذكاء" بناءً على توافق الكلمات ومعناها القريب
+        words.forEach(word => {
+            if (line.toLowerCase().includes(word)) score += 10; // كلمة مطابقة
+            if (word.length > 3 && line.toLowerCase().includes(word.substring(0, 4))) score += 5; // جزء من كلمة
+        });
+
+        if (score > highestScore) {
+            highestScore = score;
+            bestMatch = line;
+        }
+    }
+
+    // لو ملقاش تشابه عالي، بيحلل "نية" الزبون (Intent)
+    if (highestScore < 10) {
+        if (msg.includes("سعر") || msg.includes("كام") || msg.includes("بكم") || msg.includes("قيمة")) 
+            return "بالنسبة للأسعار في Egboot، التيشيرت بـ 250 والقميص بـ 450 جنيه يا فندم. تحب أحجزلك حاجة؟";
+        if (msg.includes("مقاس") || msg.includes("لبس") || msg.includes("مقاسي"))
+            return "عندنا مقاسات من M لـ 3XL، لو قلتلي طولك ووزنك هعرف مقاسك فوراً.";
+        return "أهلاً بك في Egboot! 👔 أنا مساعدك الذكي، تقدر تسألني عن الأسعار، المقاسات، أو أماكن الشحن وهرد عليك من خبرتي بالمحل.";
+    }
+
+    return bestMatch; // بيرجع السطر الأكثر ذكاءً وتوافقاً من "السبورة"
+}
+
+// --- [ لوحة الإدارة ] ---
 app.get('/admin', (req, res) => {
     const currentData = getKnowledge();
     res.send(`
-        <!DOCTYPE html>
-        <html dir="rtl">
-        <head>
-            <meta charset="UTF-8">
-            <title>لوحة إدارة Egboot</title>
-            <style>
-                body { font-family: sans-serif; background: #f4f7f6; padding: 20px; }
-                .card { max-width: 800px; margin: auto; background: white; padding: 25px; border-radius: 15px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); }
-                h2 { text-align: center; color: #007bff; }
-                textarea { width: 100%; height: 400px; padding: 15px; border: 1px solid #ddd; border-radius: 10px; font-size: 16px; box-sizing: border-box; }
-                button { width: 100%; padding: 15px; background: #28a745; color: white; border: none; border-radius: 10px; cursor: pointer; font-size: 18px; margin-top: 15px; font-weight: bold; }
-                .info-box { background: #e7f3ff; padding: 10px; border-radius: 8px; margin-bottom: 15px; color: #00529b; font-size: 14px; }
-            </style>
-        </head>
-        <body>
-            <div class="card">
-                <h2>🚀 سبورة تدريب Egboot</h2>
-                <div class="info-box">اكتب هنا وصف الملابس، الأسعار، وطريقة الشحن. البوت سيعتمد على هذا الكلام للرد على الزبائن.</div>
+        <html dir="rtl"><body style="font-family:sans-serif; background:#f4f7f6; padding:20px;">
+            <div style="max-width:800px; margin:auto; background:white; padding:25px; border-radius:15px; box-shadow:0 4px 15px rgba(0,0,0,0.1);">
+                <h2 style="color:#007bff; text-align:center;">🧠 تطوير "عقل" Egboot الداخلي</h2>
+                <p style="color:#666;">اكتب المعلومات في سطور واضحة. كل سطر بيمثل "معلومة" البوت هيفهمها ويستخدمها.</p>
                 <form action="/admin/save" method="POST">
-                    <textarea name="content" placeholder="اكتب شرحك المفصل هنا...">${currentData}</textarea>
-                    <button type="submit">تحديث ذاكرة البوت</button>
+                    <textarea name="content" style="width:100%; height:400px; padding:15px; border-radius:10px; border:1px solid #ccc; font-size:16px;">${currentData}</textarea>
+                    <button type="submit" style="width:100%; padding:15px; background:#28a745; color:white; border:none; border-radius:10px; cursor:pointer; font-weight:bold; margin-top:10px;">تحديث ذاكرة البوت</button>
                 </form>
             </div>
-        </body>
-        </html>
+        </body></html>
     `);
 });
 
-// حفظ البيانات في الملف
 app.post('/admin/save', (req, res) => {
-    try {
-        fs.writeFileSync(KNOWLEDGE_FILE, req.body.content);
-        res.send('<script>alert("تم التحديث بنجاح!"); window.location.href="/admin";</script>');
-    } catch (e) { res.status(500).send("Error saving data"); }
+    fs.writeFileSync(KNOWLEDGE_FILE, req.body.content);
+    res.send('<script>alert("تم تحديث الذكاء!"); window.location.href="/admin";</script>');
 });
 
-// --- [ 2. الرد الذكي بناءً على الشرح ] ---
+// --- [ استقبال رسائل فيسبوك ] ---
 app.post('/webhook', async (req, res) => {
     const body = req.body;
     if (body.object === 'page') {
         for (let entry of body.entry) {
             for (let event of (entry.messaging || [])) {
                 if (event.message && event.message.text) {
-                    const userMsg = event.message.text.toLowerCase().trim();
-                    const info = getKnowledge().toLowerCase();
+                    const userMsg = event.message.text;
+                    const knowledge = getKnowledge();
                     
-                    let reply = "";
-
-                    // منطق بحث بسيط وسلس في الشرح
-                    if (userMsg.includes("سعر") || userMsg.includes("بكام") || userMsg.includes("قيمه")) {
-                        reply = "أسعارنا في Egboot بتبدأ من 250 جنيه للتيشيرت و450 للقميص. تحب تشوف صور الموديلات؟";
-                    } else if (userMsg.includes("شحن") || userMsg.includes("توصيل") || userMsg.includes("امتى")) {
-                        reply = "التوصيل خلال 48 ساعة لكل المحافظات، ومتاح تعاين وتجرب قبل ما تدفع يا فندم.";
-                    } else if (userMsg.includes("مقاس") || userMsg.includes("وزن") || userMsg.includes("طول")) {
-                        reply = "عندنا مقاسات من M لـ 3XL. لو قلتلي طولك ووزنك هختارلك الأنسب فوراً.";
-                    } else {
-                        reply = "أهلاً بك في Egboot! 👔 إحنا متخصصين في الملابس الرجالي الراقية. محتاج تعرف أسعارنا ولا أماكن التوصيل؟";
-                    }
+                    const reply = findSmartResponse(userMsg, knowledge);
 
                     try {
                         await axios.post('https://graph.facebook.com/v18.0/me/messages?access_token=' + process.env.PAGE_ACCESS_TOKEN, {
                             recipient: { id: event.sender.id },
                             message: { text: reply }
                         });
-                    } catch (e) { console.error("Facebook API Error"); }
+                    } catch (e) { console.error("FB API Error"); }
                 }
             }
         }
@@ -96,10 +100,7 @@ app.post('/webhook', async (req, res) => {
     }
 });
 
-// تفعيل الويب هوك
-app.get('/webhook', (req, res) => {
-    res.send(req.query['hub.challenge']);
-});
+app.get('/webhook', (req, res) => res.send(req.query['hub.challenge']));
 
 const PORT = process.env.PORT || 8080;
-app.listen(PORT, () => console.log('🚀 Egboot is Running on Port ' + PORT));
+app.listen(PORT, () => console.log('🚀 Egboot Internal AI is Live!'));
