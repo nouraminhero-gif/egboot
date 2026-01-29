@@ -1,76 +1,90 @@
 // sales.js
 import { buildSystemPrompt } from "./brain/prompt.js";
-import { persona } from "./brain/persona.js";
 import { catalog } from "./brain/catalog.js";
-import { askAI } from "./ai.js";
+import { aiReply } from "./ai.js"; // لازم ai.js يكون فيه export اسمه aiReply
 
-// قواعد بسيطة كبداية (تتطور بعدين)
-function detectIntent(text = "") {
-  const t = text.toLowerCase();
-
-  if (/(سعر|بكام|كام|ثمن|price)/i.test(text)) return "PRICE";
-  if (/(مقاس|سایز|size|لارج|سمول|ميديوم|xl|xxl)/i.test(text)) return "SIZE";
-  if (/(شحن|توصيل|delivery|مدة|وقت)/i.test(text)) return "DELIVERY";
-  if (/(طلب|اطلب|اشتري|purchase|order)/i.test(text)) return "ORDER";
-  if (/(متاح|متوفر|available|فيه)/i.test(text)) return "AVAILABILITY";
-
-  return "GENERAL";
-}
-
-function buildDynamicContext({ intent, text }) {
-  // هنا بنحط Context مختصر + كتالوج
-  // (بعدها هنضيف memory لكل user في B)
-  const topProducts = Array.isArray(catalog?.items) ? catalog.items.slice(0, 10) : [];
-
-  return `
-[BUSINESS_MODE: SALES_ASSISTANT]
-[INTENT: ${intent}]
-[USER_MESSAGE: ${text}]
-
-[PERSONA]
-${JSON.stringify(persona, null, 2)}
-
-[CATALOG_SAMPLE]
-${JSON.stringify(topProducts, null, 2)}
-
-[RESPONSE_RULES]
-- رد مختصر ومباشر.
-- اسأل سؤال واحد واضح يقرب للشراء (مقاس/لون/ميزانية/عنوان).
-- لو السؤال عن سعر: اذكر السعر (لو موجود) + خيارين بدائل.
-- لو المنتج مش واضح: اطلب تحديد اسم المنتج أو صورة/كود.
-- ممنوع وعود كاذبة (زي “متاح 100%”) بدون بيانات.
-`;
-}
-
-export async function salesReply({ text, senderId, storeId = "default" }) {
-  const intent = detectIntent(text);
-
-  // System prompt من brain/prompt.js (انت عامل ده)
-  const system = buildSystemPrompt({
-    storeId,
-    persona,
-  });
-
-  const context = buildDynamicContext({ intent, text });
-
-  const userPrompt = `
-${context}
-
-اكتب رد كبياع محترف باللهجة المصرية.
-خلي الرد 2-4 سطور.
-في آخر الرد اسأل سؤال واحد بس يكمل عملية الشراء.
-`;
-
-  const aiText = await askAI({
-    system,
-    user: userPrompt,
-    meta: { senderId, storeId, intent },
-  });
-
-  // Fall back لو الـ AI رجع فاضي
-  if (!aiText || !aiText.trim()) {
-    return "تمام ✅ قولي بس إنت تقصد أي منتج بالظبط؟ (اسم/كود) وعايز مقاس إيه؟";
+// ================== Main entry ==================
+export async function handleIncomingText({ text, senderId }) {
+  const cleaned = (text || "").trim();
+  if (!cleaned) {
+    return {
+      replyText: "ابعتلي رسالتك تاني 🙏",
+      meta: { intent: "empty" },
+    };
   }
 
-  return aiText.trim();
+  // 1) قواعد سريعة (من غير AI) عشان سرعة وفلوس أقل
+  const quick = quickRules(cleaned);
+  if (quick) return quick;
+
+  // 2) رد بالـ AI (SaaS-ready)
+  const systemPrompt = buildSystemPrompt();
+
+  const userPrompt = `
+رسالة العميل:
+"${cleaned}"
+
+مطلوب:
+- رد مختصر وواضح باللهجة المصرية
+- استخدم الكتالوج فقط
+- لو العميل بيسأل عن سعر/مقاس/لون/شحن: جاوب من الكتالوج
+- لو المنتج مش موجود: قول غير متوفر واقترح بديل من الموجود
+- اختم بسؤال واحد يساعد تقفل الطلب (المقاس؟ اللون؟ المحافظة؟)
+
+كتالوج (للتأكيد):
+${JSON.stringify(catalog, null, 2)}
+`;
+
+  const replyText = await aiReply({
+    system: systemPrompt,
+    user: userPrompt,
+    // تقدر تزود options هنا حسب ai.js
+  });
+
+  return {
+    replyText: replyText || "تمام! تحب تقولّي مقاسك ولونك؟ 😊",
+    meta: { intent: "ai" },
+  };
+}
+
+// ================== Quick Rules (no AI) ==================
+function quickRules(text) {
+  const t = text.toLowerCase();
+
+  // help / hi
+  if (/(^|\s)(hi|hello|هاي|هلا|السلام|ازيك|أزيك)(\s|$)/.test(t)) {
+    return {
+      replyText:
+        "أهلاً بيك 👋 تحب تيشيرت ولا هودي؟ وقولي مقاسك (M/L/XL).",
+      meta: { intent: "greeting" },
+    };
+  }
+
+  // shipping
+  if (t.includes("شحن") || t.includes("توصيل") || t.includes("shipping")) {
+    const shipping = catalog?.shipping || "الشحن متاح ✅";
+    return {
+      replyText: `🚚 ${shipping}\nقولي محافظتك والمقاس اللي عايزه؟`,
+      meta: { intent: "shipping" },
+    };
+  }
+
+  // show catalog
+  if (t.includes("الكتالوج") || t.includes("المتاح") || t.includes("عندك ايه")) {
+    const items = catalog?.categories || {};
+    const lines = Object.keys(items).map((k) => {
+      const p = items[k]?.price;
+      const sizes = (items[k]?.sizes || []).join("/");
+      const colors = (items[k]?.colors || []).join("، ");
+      return `• ${k}: ${p} جنيه | مقاسات: ${sizes} | ألوان: ${colors}`;
+    });
+
+    return {
+      replyText:
+        `ده المتاح عندنا ✅\n\n${lines.join("\n")}\n\nتحب تختار أنهي واحد؟`,
+      meta: { intent: "catalog" },
+    };
+  }
+
+  return null;
 }
