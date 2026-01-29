@@ -5,7 +5,7 @@ import { askAI } from './ai.js';
 const app = express();
 app.use(express.json());
 
-// 1. الرد الفوري بـ 200 لمنع فيسبوك من تكرار الرسالة
+// الرد الفوري لإيقاف تكرار فيسبوك (أهم سطر لاستقرار السيرفر)
 app.post('/webhook', async (req, res) => {
     res.status(200).send('EVENT_RECEIVED');
 
@@ -19,22 +19,20 @@ app.post('/webhook', async (req, res) => {
             const userMessage = messaging.message.text;
 
             try {
-                // 2. استدعاء ذكاء Gemini
+                // استدعاء ذكاء Gemini
                 const aiResponse = await askAI(sender_psid, userMessage);
                 
-                // 3. إرسال الرد لفيسبوك باستخدام التوكن المضاف في Variables
                 await axios.post(`https://graph.facebook.com/v18.0/me/messages?access_token=${process.env.PAGE_ACCESS_TOKEN}`, {
                     recipient: { id: sender_psid },
                     message: { text: aiResponse }
                 });
             } catch (e) {
-                console.error("خطأ في الإرسال:", e.message);
+                console.error("خطأ في إرسال الرد:", e.message);
             }
         }
     }
 });
 
-// 4. كود التحقق من الـ Webhook
 app.get('/webhook', (req, res) => {
     const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "egboot_token_2026";
     if (req.query['hub.verify_token'] === VERIFY_TOKEN) {
