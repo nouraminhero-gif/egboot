@@ -1,155 +1,78 @@
 // queue.js
-import { Queue, Worker } from "bullmq";
 import IORedis from "ioredis";
 
 /**
- * اسم الكيو
+ * تأكد إن REDIS_URL موجود
  */
-export const QUEUE_NAME = "incoming-messages";
-
-/**
- * تحقق من وجود REDIS_URL
- */
-function assertRedisUrl() {
-  const url = process.env.REDIS_URL;
-  if (!url) {
-    console.warn("⚠️ REDIS_URL is not defined");
-    return null;
-  }
-  return url;
+if (!process.env.REDIS_URL) {
+  console.error("❌ REDIS_URL is missing");
+  process.exit(1);
 }
 
 /**
- * بناء اتصال Redis متوافق مع Railway
+ * إنشاء اتصال Redis
  */
-function buildBullMQConnection(redisUrl) {
-  const u = new URL(redisUrl);
-
-  return {
-    host: u.hostname,
-    port: Number(u.port || 6379),
-    username: u.username || undefined,
-    password: u.password || undefined,
-
-    // Railway غالبًا بيستخدم TLS
-    tls: u.protocol === "rediss:" ? {} : undefined,
-
-    // BullMQ requirement
-    maxRetriesPerRequest: null,
-
-    // حلول مشاكل timeout / DNS
-    connectTimeout: 15000,
-    family: 0,
-  };
-}
+export const redis = new IORedis(process.env.REDIS_URL, {
+  maxRetriesPerRequest: null,
+  enableReadyCheck: true,
+  retryStrategy(times) {
+    const delay = Math.min(times * 1000, 5000);
+    return delay;
+  },
+});
 
 /**
- * Redis connection (shared)
+ * Logs للاتصال
  */
-let redisConnection = null;
-function getRedisConnection() {
-  if (redisConnection) return redisConnection;
+redis.on("connect", () => {
+  console.log("✅ Connected to Redis");
+});
 
-  const redisUrl = assertRedisUrl();
-  if (!redisUrl) return null;
+redis.on("ready", () => {
+  console.log("🚀 Redis is ready");
+});
 
-  redisConnection = new IORedis(buildBullMQConnection(redisUrl));
+redis.on("error", (err) => {
+  console.error("❌ Redis error:", err.message);
+});
 
-  redisConnection.on("connect", () => {
-    console.log("✅ Redis connected");
-  });
-
-  redisConnection.on("error", (err) => {
-    console.error("❌ Redis connection error:", err.message);
-  });
-
-  return redisConnection;
-}
+redis.on("close", () => {
+  console.warn("⚠️ Redis connection closed");
+});
 
 /**
- * Queue instance
- */
-let queueInstance = null;
-
-export function getQueue() {
-  if (queueInstance) return queueInstance;
-
-  const redisUrl = assertRedisUrl();
-  if (!redisUrl) return null;
-
-  queueInstance = new Queue(QUEUE_NAME, {
-    connection: buildBullMQConnection(redisUrl),
-  });
-
-  return queueInstance;
-}
-
-/**
- * إضافة رسالة للكيو
+ * إضافة رسالة للطابور
  */
 export async function enqueueIncomingMessage(data) {
-  const queue = getQueue();
-  if (!queue) {
-    console.warn("⚠️ Queue not available – skipping enqueue");
-    return null;
+  try {
+    await redis.lpush("incoming_messages", JSON.stringify(data));
+    console.log("📥 Message enqueued");
+  } catch (err) {
+    console.error("❌ enqueue error:", err.message);
   }
-
-  return await queue.add("incoming", data, {
-    removeOnComplete: true,
-    removeOnFail: 100,
-  });
 }
 
 /**
- * Worker instance
+ * تشغيل worker لمعالجة الرسائل
  */
-let workerInstance = null;
+export function startWorker(handler) {
+  console.log("👷 Worker started");
 
-/**
- * تشغيل الـ Worker
- */
-export function startWorker() {
-  if (workerInstance) return workerInstance;
+  const loop = async () => {
+    try {
+      const result = await redis.brpop("incoming_messages", 0);
+      if (!result) return;
 
-  const redisUrl = assertRedisUrl();
-  if (!redisUrl) {
-    console.warn("⚠️ Worker disabled (no Redis)");
-    return null;
-  }
+      const [, message] = result;
+      const parsed = JSON.parse(message);
 
-  workerInstance = new Worker(
-    QUEUE_NAME,
-    async (job) => {
-      try {
-        // lazy import لتفادي circular deps
-        const salesModule = await import("./sales.js");
-        const handler =
-          salesModule.processIncomingMessage ||
-          salesModule.default;
-
-        if (typeof handler !== "function") {
-          throw new Error("sales.js must export a function");
-        }
-
-        return await handler(job.data);
-      } catch (err) {
-        console.error("❌ Job processing error:", err.message);
-        throw err;
-      }
-    },
-    {
-      connection: buildBullMQConnection(redisUrl),
-      concurrency: 3,
+      await handler(parsed);
+    } catch (err) {
+      console.error("❌ Worker error:", err.message);
     }
-  );
 
-  workerInstance.on("ready", () => {
-    console.log("🚀 Worker started and connected to Redis");
-  });
+    setImmediate(loop);
+  };
 
-  workerInstance.on("error", (err) => {
-    console.error("❌ Worker error:", err.message);
-  });
-
-  return workerInstance;
+  loop();
 }
