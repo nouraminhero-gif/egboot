@@ -1,46 +1,44 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
+import { buildSalesReply } from "./sales.js";
 
-const key = process.env.GEMINI_API_KEY;
-const genAI = key ? new GoogleGenerativeAI(key) : null;
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
-export async function askAI({ systemPrompt, userMessage }) {
-  if (!genAI) {
-    return { reply: "ثواني براجع السيستم 🤍", updates: {} };
-  }
+const SYSTEM_PROMPT = `
+إنت اسـمك EgBoot.
+إنت بياع محترف في محل ملابس مصري.
+أسلوبك:
+- مصري وودود
+- بتفهم العميل الأول
+- متستعجلش البيع
+- بس دايمًا تقفله بأدب
 
+بتبيع:
+- تيشيرتات
+- هوديز
+- بناطيل
+
+دايمًا اسأل عن:
+- المقاس
+- رجالي ولا حريمي
+- اللون
+`;
+
+export async function askAI(message) {
   try {
     const model = genAI.getGenerativeModel({
       model: "gemini-1.5-flash",
-      systemInstruction: systemPrompt
+      systemInstruction: SYSTEM_PROMPT,
     });
 
-    const result = await model.generateContent(userMessage);
-    const raw = result?.response?.text?.() || "";
+    const salesContext = buildSalesReply(message);
 
-    // حاول تبارس JSON حتى لو الموديل زوّد كلام
-    const json = extractJson(raw);
-    if (!json) {
-      return { reply: "ثواني كده.. قولي المقاس واللون والمحافظة؟ 🤍", updates: {} };
-    }
-    return {
-      reply: json.reply || "تمام ❤️ قولي المقاس واللون والمحافظة؟",
-      updates: json.updates || {},
-      suggestedProductId: json.suggestedProductId || null
-    };
-  } catch (e) {
-    return { reply: "ثواني براجع السيستم 🤍", updates: {} };
-  }
-}
+    const result = await model.generateContent(
+      `${salesContext}\n\nرسالة العميل: ${message}`
+    );
 
-function extractJson(text) {
-  try {
-    // يلقط أول بلوك JSON
-    const start = text.indexOf("{");
-    const end = text.lastIndexOf("}");
-    if (start === -1 || end === -1 || end <= start) return null;
-    const slice = text.slice(start, end + 1);
-    return JSON.parse(slice);
-  } catch {
-    return null;
+    return result.response.text();
+  } catch (err) {
+    console.error("AI Error:", err.message);
+    return "حصل مشكلة بسيطة، ممكن تعيد السؤال؟ ❤️";
   }
 }
