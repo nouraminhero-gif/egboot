@@ -1,42 +1,70 @@
-import express from 'express';
-import axios from 'axios';
-import { askAI } from './ai.js';
+// server.js (ES Modules)
+import express from "express";
+import axios from "axios";
+import "dotenv/config";
+import { askAI } from "./ai.js";
 
 const app = express();
+
+// Facebook sends JSON
 app.use(express.json());
 
-app.post('/webhook', async (req, res) => {
-    // ركز هنا: بنرد بـ 200 فوراً عشان التكرار يقف
-    res.status(200).send('EVENT_RECEIVED');
+// ====== ENV ======
+const PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN;
+const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 
-    const body = req.body;
-    if (body.object === 'page') {
-        const entry = body.entry[0];
-        const messaging = entry.messaging[0];
-        
-        if (messaging && messaging.message && messaging.message.text) {
-            const sender_psid = messaging.sender.id;
-            const userMessage = messaging.message.text;
+if (!PAGE_ACCESS_TOKEN) {
+  console.warn("⚠️ Missing PAGE_ACCESS_TOKEN in environment variables.");
+}
+if (!VERIFY_TOKEN) {
+  console.warn("⚠️ Missing VERIFY_TOKEN in environment variables.");
+}
 
-            try {
-                const aiResponse = await askAI(sender_psid, userMessage);
-                await axios.post(`https://graph.facebook.com/v18.0/me/messages?access_token=${process.env.PAGE_ACCESS_TOKEN}`, {
-                    recipient: { id: sender_psid },
-                    message: { text: aiResponse }
-                });
-            } catch (e) {
-                console.error("خطأ في الإرسال");
-            }
-        }
-    }
+// ====== HELPERS ======
+async function sendTextMessage(psid, text) {
+  if (!PAGE_ACCESS_TOKEN) {
+    console.error("❌ Cannot send message: PAGE_ACCESS_TOKEN is missing.");
+    return;
+  }
+
+  try {
+    await axios.post(
+      "https://graph.facebook.com/v19.0/me/messages",
+      {
+        recipient: { id: psid },
+        message: { text },
+      },
+      {
+        params: { access_token: PAGE_ACCESS_TOKEN },
+        timeout: 8000,
+      }
+    );
+  } catch (err) {
+    const fbErr = err?.response?.data;
+    console.error("❌ Facebook Send API error:", fbErr || err.message);
+  }
+}
+
+// ====== ROUTES ======
+
+// Verification (GET)
+app.get("/webhook", (req, res) => {
+  const mode = req.query["hub.mode"];
+  const token = req.query["hub.verify_token"];
+  const challenge = req.query["hub.challenge"];
+
+  if (mode === "subscribe" && token === VERIFY_TOKEN) {
+    console.log("✅ Webhook verified");
+    return res.status(200).send(challenge);
+  }
+
+  console.log("❌ Webhook verification failed");
+  return res.sendStatus(403);
 });
 
-app.get('/webhook', (req, res) => {
-    const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "egboot_token_2026";
-    if (req.query['hub.verify_token'] === VERIFY_TOKEN) {
-        res.status(200).send(req.query['hub.challenge']);
-    }
-});
+// Receive messages (POST)
+app.post("/webhook", (req, res) => {
+  // ✅ القاعدة الذهبية: رد فوري قبل أي معالجة
+  res.status(200).send("EVENT_RECEIVED");
 
-const PORT = process.env.PORT || 8080;
-app.listen(PORT, () => console.log(`Egboot Server is running on port ${PORT}`));
+  const body =
