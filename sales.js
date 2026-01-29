@@ -1,100 +1,76 @@
-// Catalog بسيط كبداية (المرحلة 1)
-// بعد كده هنخليه dynamic من App العميل (SaaS)
-export const CATALOG = {
-  tshirt: {
-    title: "تيشيرت",
-    prices: [
-      { name: "قطن", price: 250 },
-      { name: "قطن تقيل", price: 320 }
-    ],
-    colors: ["أسود", "أبيض", "كحلي", "رمادي"],
-    sizes: ["S", "M", "L", "XL", "XXL"]
-  },
-  hoodie: {
-    title: "هودي",
-    prices: [{ name: "شتوي تقيل", price: 550 }],
-    colors: ["أسود", "كحلي", "رمادي"],
-    sizes: ["M", "L", "XL", "XXL"]
-  },
-  pants: {
-    title: "بنطلون",
-    prices: [{ name: "جينز", price: 650 }],
-    colors: ["أسود", "أزرق"],
-    sizes: ["30", "32", "34", "36", "38"]
-  }
-};
+// sales.js
+import { buildSystemPrompt } from "./brain/prompt.js";
+import { persona } from "./brain/persona.js";
+import { catalog } from "./brain/catalog.js";
+import { askAI } from "./ai.js";
 
-export function detectIntent(userText) {
-  const t = userText.toLowerCase();
+// قواعد بسيطة كبداية (تتطور بعدين)
+function detectIntent(text = "") {
+  const t = text.toLowerCase();
 
-  if (t.includes("تيشيرت") || t.includes("tshirt") || t.includes("t-shirt")) return "tshirt";
-  if (t.includes("هودي") || t.includes("hoodie")) return "hoodie";
-  if (t.includes("بنطلون") || t.includes("جينز") || t.includes("pants")) return "pants";
+  if (/(سعر|بكام|كام|ثمن|price)/i.test(text)) return "PRICE";
+  if (/(مقاس|سایز|size|لارج|سمول|ميديوم|xl|xxl)/i.test(text)) return "SIZE";
+  if (/(شحن|توصيل|delivery|مدة|وقت)/i.test(text)) return "DELIVERY";
+  if (/(طلب|اطلب|اشتري|purchase|order)/i.test(text)) return "ORDER";
+  if (/(متاح|متوفر|available|فيه)/i.test(text)) return "AVAILABILITY";
 
-  if (t.includes("سعر") || t.includes("بكام") || t.includes("كام")) return "price";
-  if (t.includes("مقاس") || t.includes("size")) return "size";
-  if (t.includes("لون") || t.includes("color")) return "color";
-  if (t.includes("شحن") || t.includes("توصيل")) return "shipping";
-  if (t.includes("عنوان") || t.includes("العنوان")) return "address";
-  if (t.includes("رقم") || t.includes("موبايل") || t.includes("تليفون")) return "phone";
-
-  return "general";
+  return "GENERAL";
 }
 
-export function buildSalesContext(userText) {
-  const intent = detectIntent(userText);
-
-  const common = `
-أنت "Egboot" بياع مصري تقيل لمحل ملابس.
-هدفك: تقفل بيع بأدب وبسرعة بدون رغي.
-قواعد:
-- رد مختصر 2-4 سطور.
-- اسأل سؤال واحد واضح في آخر الرد علشان تحرك العميل للخطوة الجاية.
-- لو العميل قال "السلام عليكم" رد ترحيب وخليه يختار منتج.
-- ممنوع تتكلم في سياسة/طب/أي حاجة خارج الملابس، حوله للملابس بلُطف.
-`;
-
-  const shipping = `
-الشحن:
-- داخل القاهرة: 50 جنيه
-- باقي المحافظات: 70 جنيه
-الدفع: كاش عند الاستلام.
-`;
-
-  if (intent === "tshirt" || intent === "hoodie" || intent === "pants") {
-    const item = CATALOG[intent];
-    const prices = item.prices.map((p) => `- ${p.name}: ${p.price} جنيه`).join("\n");
-    return `
-${common}
-
-المنتج المطلوب: ${item.title}
-الأسعار:
-${prices}
-الألوان المتاحة: ${item.colors.join(" - ")}
-المقاسات: ${item.sizes.join(" - ")}
-
-${shipping}
-
-اطلب من العميل المقاس واللون.
-`;
-  }
-
-  if (intent === "price") {
-    return `
-${common}
-عندنا:
-- تيشيرت قطن: 250
-- تيشيرت قطن تقيل: 320
-- هودي شتوي: 550
-- بنطلون جينز: 650
-${shipping}
-اسأل العميل: "تحب إيه فيهم + مقاسك؟"
-`;
-  }
+function buildDynamicContext({ intent, text }) {
+  // هنا بنحط Context مختصر + كتالوج
+  // (بعدها هنضيف memory لكل user في B)
+  const topProducts = Array.isArray(catalog?.items) ? catalog.items.slice(0, 10) : [];
 
   return `
-${common}
-${shipping}
-ابدأ بتحديد احتياج العميل: (تيشيرت/هودي/بنطلون) + رجالي ولا حريمي + المقاس.
+[BUSINESS_MODE: SALES_ASSISTANT]
+[INTENT: ${intent}]
+[USER_MESSAGE: ${text}]
+
+[PERSONA]
+${JSON.stringify(persona, null, 2)}
+
+[CATALOG_SAMPLE]
+${JSON.stringify(topProducts, null, 2)}
+
+[RESPONSE_RULES]
+- رد مختصر ومباشر.
+- اسأل سؤال واحد واضح يقرب للشراء (مقاس/لون/ميزانية/عنوان).
+- لو السؤال عن سعر: اذكر السعر (لو موجود) + خيارين بدائل.
+- لو المنتج مش واضح: اطلب تحديد اسم المنتج أو صورة/كود.
+- ممنوع وعود كاذبة (زي “متاح 100%”) بدون بيانات.
 `;
+}
+
+export async function salesReply({ text, senderId, storeId = "default" }) {
+  const intent = detectIntent(text);
+
+  // System prompt من brain/prompt.js (انت عامل ده)
+  const system = buildSystemPrompt({
+    storeId,
+    persona,
+  });
+
+  const context = buildDynamicContext({ intent, text });
+
+  const userPrompt = `
+${context}
+
+اكتب رد كبياع محترف باللهجة المصرية.
+خلي الرد 2-4 سطور.
+في آخر الرد اسأل سؤال واحد بس يكمل عملية الشراء.
+`;
+
+  const aiText = await askAI({
+    system,
+    user: userPrompt,
+    meta: { senderId, storeId, intent },
+  });
+
+  // Fall back لو الـ AI رجع فاضي
+  if (!aiText || !aiText.trim()) {
+    return "تمام ✅ قولي بس إنت تقصد أي منتج بالظبط؟ (اسم/كود) وعايز مقاس إيه؟";
+  }
+
+  return aiText.trim();
 }
