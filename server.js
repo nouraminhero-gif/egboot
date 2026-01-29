@@ -19,22 +19,22 @@ app.post('/webhook', async (req, res) => {
             const userMessage = messaging.message.text;
 
             try {
-                // 2. طلب الرد من ذكاء Gemini
+                // 2. استدعاء ذكاء Gemini
                 const aiResponse = await askAI(sender_psid, userMessage);
                 
-                // 3. إرسال رد الـ AI لفيسبوك باستخدام التوكن الخاص بك
+                // 3. إرسال الرد لفيسبوك باستخدام التوكن المضاف في Variables
                 await axios.post(`https://graph.facebook.com/v18.0/me/messages?access_token=${process.env.PAGE_ACCESS_TOKEN}`, {
                     recipient: { id: sender_psid },
                     message: { text: aiResponse }
                 });
             } catch (e) {
-                console.error("Error in sending process:", e.message);
+                console.error("خطأ في الإرسال:", e.message);
             }
         }
     }
 });
 
-// 4. كود التحقق من الـ Webhook الخاص بفيسبوك
+// 4. كود التحقق من الـ Webhook
 app.get('/webhook', (req, res) => {
     const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "egboot_token_2026";
     if (req.query['hub.verify_token'] === VERIFY_TOKEN) {
@@ -42,6 +42,5 @@ app.get('/webhook', (req, res) => {
     }
 });
 
-// 5. تشغيل السيرفر على البورت المطلوب في Railway
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => console.log(`Egboot Server is running on port ${PORT}`));
