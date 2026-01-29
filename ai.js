@@ -1,44 +1,32 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
-import { buildSalesReply } from "./sales.js";
+import { buildSalesContext } from "./sales.js";
 
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 
-const SYSTEM_PROMPT = `
-إنت اسـمك EgBoot.
-إنت بياع محترف في محل ملابس مصري.
-أسلوبك:
-- مصري وودود
-- بتفهم العميل الأول
-- متستعجلش البيع
-- بس دايمًا تقفله بأدب
+const genAI = GEMINI_API_KEY ? new GoogleGenerativeAI(GEMINI_API_KEY) : null;
 
-بتبيع:
-- تيشيرتات
-- هوديز
-- بناطيل
+export async function askAI(userText) {
+  // ✅ fallback لو مفيش مفتاح
+  if (!genAI) {
+    return "ثواني براجع السيستم 🤍\nقولي محتاج تيشيرت ولا هودي ولا بنطلون؟";
+  }
 
-دايمًا اسأل عن:
-- المقاس
-- رجالي ولا حريمي
-- اللون
-`;
+  const system = buildSalesContext(userText);
 
-export async function askAI(message) {
   try {
     const model = genAI.getGenerativeModel({
       model: "gemini-1.5-flash",
-      systemInstruction: SYSTEM_PROMPT,
+      systemInstruction: system
     });
 
-    const salesContext = buildSalesReply(message);
+    const result = await model.generateContent(userText);
+    const reply = result?.response?.text?.() || "";
 
-    const result = await model.generateContent(
-      `${salesContext}\n\nرسالة العميل: ${message}`
-    );
-
-    return result.response.text();
+    // ✅ fallback لو رد فاضي
+    return reply.trim() || "تمام 🤍 قولي تحب تيشيرت ولا هودي ولا بنطلون؟";
   } catch (err) {
-    console.error("AI Error:", err.message);
-    return "حصل مشكلة بسيطة، ممكن تعيد السؤال؟ ❤️";
+    console.error("Gemini error:", err?.message);
+    // ✅ Graceful degradation
+    return "ثواني براجع السيستم 🤍\nقولي عايز تيشيرت ولا هودي ولا بنطلون؟";
   }
 }
