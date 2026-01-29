@@ -1,6 +1,4 @@
 // ai.js
-import fetch from "node-fetch";
-
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const MODEL = "models/gemini-1.5-pro"; // ✅ ده الموجود حاليًا
 
