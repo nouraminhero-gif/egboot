@@ -1,76 +1,134 @@
-// queue.js
+// queue.js (FULL FILE) ✅
+// Works on Railway Redis (Public/Private URL) + fixes ETIMEDOUT / Connection is closed issues
+
 import IORedis from "ioredis";
 
-if (!process.env.REDIS_URL) {
-  console.error("❌ REDIS_URL is missing");
-  process.exit(1);
+/**
+ * Pick the best Redis URL:
+ * - Prefer REDIS_PUBLIC_URL if you exposed it (proxy.rlwy.net)
+ * - Otherwise use REDIS_URL (internal containers)
+ */
+const REDIS_URL =
+  process.env.REDIS_PUBLIC_URL ||
+  process.env.REDIS_URL ||
+  process.env.REDIS ||
+  "";
+
+// Small helper: parse host safely
+function getHostFromRedisUrl(url) {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return "";
+  }
 }
 
-console.log("REDIS_URL exists? true");
+const host = getHostFromRedisUrl(REDIS_URL);
 
-export const redis = new IORedis(process.env.REDIS_URL, {
-  tls: {},                 // 🔥 مهم جدًا لـ Railway
-  connectTimeout: 10000,   // 10 ثواني
-  maxRetriesPerRequest: 3,
+/**
+ * Railway Redis often needs TLS when using the public proxy (proxy.rlwy.net)
+ * Even if the scheme is `redis://` you still might need TLS.
+ */
+const needsTLS =
+  REDIS_URL.startsWith("rediss://") ||
+  host.includes("proxy.rlwy.net") ||
+  host.includes("railway") ||
+  host.includes("rlwy");
+
+const redisOptions = {
+  // ✅ Fix: prevents BullMQ/ioredis from throwing "Reached the max retries..."
+  maxRetriesPerRequest: null,
+
+  // ✅ Fix: Railway sometimes causes "Connection is closed" with ready check
+  enableReadyCheck: false,
+
+  // ✅ Keep timeouts reasonable
+  connectTimeout: 20000, // 20s
+  lazyConnect: false,
+
+  // ✅ Control reconnection behavior
   retryStrategy(times) {
-    if (times > 5) {
-      console.error("❌ Redis retry limit reached");
-      return null; // stop retrying
-    }
-    return Math.min(times * 1000, 5000);
+    // backoff: 0.5s -> 5s
+    const delay = Math.min(times * 500, 5000);
+    return delay;
   },
-});
 
+  reconnectOnError(err) {
+    // Reconnect on common transient errors
+    const msg = err?.message || "";
+    if (
+      msg.includes("READONLY") ||
+      msg.includes("ETIMEDOUT") ||
+      msg.includes("ECONNRESET") ||
+      msg.includes("Connection is closed")
+    ) {
+      return true;
+    }
+    return false;
+  },
+};
+
+// ✅ Apply TLS only when needed
+if (needsTLS) {
+  redisOptions.tls = {
+    // Railway proxy sometimes uses cert chains that fail strict validation
+    rejectUnauthorized: false,
+  };
+}
+
+if (!REDIS_URL) {
+  console.warn("⚠️ REDIS_URL/REDIS_PUBLIC_URL is not set!");
+}
+
+/**
+ * Create ONE shared Redis connection instance
+ */
+export const redis = new IORedis(REDIS_URL, redisOptions);
+
+/**
+ * Helpful logs
+ */
 redis.on("connect", () => {
   console.log("✅ Redis connected");
+  console.log("🔗 Redis host:", host || "unknown");
+  console.log("🔐 TLS:", needsTLS ? "enabled" : "disabled");
 });
 
 redis.on("ready", () => {
-  console.log("🚀 Redis ready");
+  console.log("🟢 Redis ready to use");
 });
 
 redis.on("error", (err) => {
-  console.error("❌ Redis error:", err.message);
+  console.error("❌ Redis error:", err?.message || err);
 });
 
 redis.on("close", () => {
   console.warn("⚠️ Redis connection closed");
 });
 
+redis.on("reconnecting", (time) => {
+  console.warn("🔁 Redis reconnecting... next attempt in", time, "ms");
+});
+
 /**
- * enqueue message
+ * Optional: simple helper functions
+ * (use these if you want)
  */
-export async function enqueueIncomingMessage(data) {
-  try {
-    await redis.lpush("incoming_messages", JSON.stringify(data));
-    console.log("📥 Message enqueued");
-  } catch (err) {
-    console.error("❌ enqueue error:", err.message);
-  }
+export async function redisPing() {
+  return await redis.ping();
 }
 
-/**
- * worker
- */
-export function startWorker(handler) {
-  console.log("👷 Worker started");
+export async function redisSet(key, value, ttlSeconds = 0) {
+  if (ttlSeconds > 0) {
+    return await redis.set(key, value, "EX", ttlSeconds);
+  }
+  return await redis.set(key, value);
+}
 
-  const work = async () => {
-    try {
-      const result = await redis.brpop("incoming_messages", 0);
-      if (!result) return;
+export async function redisGet(key) {
+  return await redis.get(key);
+}
 
-      const [, raw] = result;
-      const data = JSON.parse(raw);
-
-      await handler(data);
-    } catch (err) {
-      console.error("❌ Worker error:", err.message);
-      await new Promise(r => setTimeout(r, 2000));
-    }
-
-    setImmediate(work);
-  };
-
-  work();
+export async function redisDel(key) {
+  return await redis.del(key);
 }
