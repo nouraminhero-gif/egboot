@@ -5,8 +5,8 @@ import { askAI } from './ai.js';
 const app = express();
 app.use(express.json());
 
-// الرد الفوري لإيقاف تكرار فيسبوك (أهم سطر لاستقرار السيرفر)
 app.post('/webhook', async (req, res) => {
+    // ركز هنا: بنرد بـ 200 فوراً عشان التكرار يقف
     res.status(200).send('EVENT_RECEIVED');
 
     const body = req.body;
@@ -19,15 +19,13 @@ app.post('/webhook', async (req, res) => {
             const userMessage = messaging.message.text;
 
             try {
-                // استدعاء ذكاء Gemini
                 const aiResponse = await askAI(sender_psid, userMessage);
-                
                 await axios.post(`https://graph.facebook.com/v18.0/me/messages?access_token=${process.env.PAGE_ACCESS_TOKEN}`, {
                     recipient: { id: sender_psid },
                     message: { text: aiResponse }
                 });
             } catch (e) {
-                console.error("خطأ في إرسال الرد:", e.message);
+                console.error("خطأ في الإرسال");
             }
         }
     }
