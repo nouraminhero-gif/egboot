@@ -1,3 +1,4 @@
+console.log("REDIS_URL exists?", Boolean(process.env.REDIS_URL));
 import "dotenv/config";
 import express from "express";
 import { enqueueIncomingMessage, startWorker } from "./queue.js";
