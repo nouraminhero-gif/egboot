@@ -1,35 +1,32 @@
 // queue.js
 import IORedis from "ioredis";
 
-/**
- * تأكد إن REDIS_URL موجود
- */
 if (!process.env.REDIS_URL) {
   console.error("❌ REDIS_URL is missing");
   process.exit(1);
 }
 
-/**
- * إنشاء اتصال Redis
- */
+console.log("REDIS_URL exists? true");
+
 export const redis = new IORedis(process.env.REDIS_URL, {
-  maxRetriesPerRequest: null,
-  enableReadyCheck: true,
+  tls: {},                 // 🔥 مهم جدًا لـ Railway
+  connectTimeout: 10000,   // 10 ثواني
+  maxRetriesPerRequest: 3,
   retryStrategy(times) {
-    const delay = Math.min(times * 1000, 5000);
-    return delay;
+    if (times > 5) {
+      console.error("❌ Redis retry limit reached");
+      return null; // stop retrying
+    }
+    return Math.min(times * 1000, 5000);
   },
 });
 
-/**
- * Logs للاتصال
- */
 redis.on("connect", () => {
-  console.log("✅ Connected to Redis");
+  console.log("✅ Redis connected");
 });
 
 redis.on("ready", () => {
-  console.log("🚀 Redis is ready");
+  console.log("🚀 Redis ready");
 });
 
 redis.on("error", (err) => {
@@ -41,7 +38,7 @@ redis.on("close", () => {
 });
 
 /**
- * إضافة رسالة للطابور
+ * enqueue message
  */
 export async function enqueueIncomingMessage(data) {
   try {
@@ -53,26 +50,27 @@ export async function enqueueIncomingMessage(data) {
 }
 
 /**
- * تشغيل worker لمعالجة الرسائل
+ * worker
  */
 export function startWorker(handler) {
   console.log("👷 Worker started");
 
-  const loop = async () => {
+  const work = async () => {
     try {
       const result = await redis.brpop("incoming_messages", 0);
       if (!result) return;
 
-      const [, message] = result;
-      const parsed = JSON.parse(message);
+      const [, raw] = result;
+      const data = JSON.parse(raw);
 
-      await handler(parsed);
+      await handler(data);
     } catch (err) {
       console.error("❌ Worker error:", err.message);
+      await new Promise(r => setTimeout(r, 2000));
     }
 
-    setImmediate(loop);
+    setImmediate(work);
   };
 
-  loop();
+  work();
 }
