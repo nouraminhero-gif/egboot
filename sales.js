@@ -1,41 +1,72 @@
 // sales.js
 import { catalog } from "./brain/catalog.js";
 
-/**
- * الرد البيعي الأساسي (مرحلة A)
- * @param {string} text - رسالة العميل
- * @param {string} senderId - PSID
- */
+// ================== Main Sales Reply ==================
 export async function salesReply(text, senderId) {
-  const msg = text.toLowerCase();
+  try {
+    const msg = normalize(text);
 
-  // 👕 tshirt
-  if (msg.includes("تيشيرت") || msg.includes("tshirt")) {
-    const tshirt = catalog.categories.tshirt;
-    return `
-👕 تيشيرتاتنا المتاحة:
-💰 السعر: ${tshirt.price} جنيه
-📏 المقاسات: ${tshirt.sizes.join(" - ")}
-🎨 الألوان: ${tshirt.colors.join(" - ")}
-${catalog.shipping}
-`;
+    // ===== Greetings =====
+    if (includesAny(msg, ["السلام", "اهلا", "هاي", "مرحبا"])) {
+      return "أهلاً بيك 👋 تحب تشوف التيشيرتات ولا الهوديز؟";
+    }
+
+    // ===== T-SHIRT =====
+    if (includesAny(msg, ["تيشيرت", "tshirt", "t-shirt"])) {
+      return formatProduct("tshirt");
+    }
+
+    // ===== HOODIE =====
+    if (includesAny(msg, ["هودي", "hoodie"])) {
+      return formatProduct("hoodie");
+    }
+
+    // ===== PRICE =====
+    if (includesAny(msg, ["سعر", "بكام", "كام"])) {
+      return priceList();
+    }
+
+    // ===== SHIPPING =====
+    if (includesAny(msg, ["شحن", "توصيل"])) {
+      return catalog.shipping;
+    }
+
+    // ===== FALLBACK =====
+    return "ممكن توضح أكتر؟ 😊\nتيشيرت 👕 | هودي 🧥 | أسعار 💰";
+
+  } catch (err) {
+    console.error("❌ salesReply error:", err.message);
+    return "حصل خطأ بسيط 😅 جرب تاني بعد ثانية";
   }
+}
 
-  // 🧥 hoodie
-  if (msg.includes("هودي") || msg.includes("hoodie")) {
-    const hoodie = catalog.categories.hoodie;
-    return `
-🧥 هوديز متاحة:
-💰 السعر: ${hoodie.price} جنيه
-📏 المقاسات: ${hoodie.sizes.join(" - ")}
-🎨 الألوان: ${hoodie.colors.join(" - ")}
-${catalog.shipping}
-`;
-  }
+// ================== Helpers ==================
+function formatProduct(type) {
+  const item = catalog.categories[type];
+  if (!item) return "المنتج غير متوفر حاليًا ❌";
 
-  // ❓ fallback
-  return `
-أهلاً بيك 👋  
-احنا عندنا:
-• تيشيرتات  
-•
+  return (
+    `📦 ${type === "tshirt" ? "تيشيرت" : "هودي"}\n` +
+    `💰 السعر: ${item.price} جنيه\n` +
+    `📏 المقاسات: ${item.sizes.join(" / ")}\n` +
+    `🎨 الألوان: ${item.colors.join(" / ")}\n\n` +
+    `تحب تطلب؟ ابعت المقاس واللون 👌`
+  );
+}
+
+function priceList() {
+  return (
+    `💰 الأسعار:\n` +
+    `👕 تيشيرت: ${catalog.categories.tshirt.price} جنيه\n` +
+    `🧥 هودي: ${catalog.categories.hoodie.price} جنيه\n\n` +
+    `${catalog.shipping}`
+  );
+}
+
+function normalize(text = "") {
+  return text.toLowerCase().trim();
+}
+
+function includesAny(text, keywords = []) {
+  return keywords.some((k) => text.includes(k));
+}
