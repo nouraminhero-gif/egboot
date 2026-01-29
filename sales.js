@@ -1,94 +1,205 @@
 // sales.js
 import { catalog } from "./brain/catalog.js";
 import { FAQ } from "./brain/faq.js";
-import { aiFallbackAnswer } from "./ai.js";
 
 /**
- * session example:
- * {
- *   step: "product" | "size" | "color" | "confirm",
- *   product: null,
- *   size: null,
- *   color: null
- * }
+ * ✅ Session store (in-memory) — مناسب للتجربة
+ * لو SaaS/Production قوي: هننقله Redis (عشان السيرفر لما يعمل restart ماينساش)
  */
+const sessions = new Map();
+const SESSION_TTL_MS = 30 * 60 * 1000; // 30 min
 
-export async function salesReply(message, session) {
-  const text = message.trim();
-
-  // لو مفيش session نبدأ من الأول
-  if (!session.step) {
-    session.step = "product";
-    return "تحب تطلب ايه؟ 👕 تيشيرت ولا 🧥 هودي؟";
-  }
-
-  /* ================= PRODUCT ================= */
-  if (session.step === "product") {
-    if (text.includes("تيشير")) {
-      session.product = "tshirt";
-    } else if (text.includes("هودي")) {
-      session.product = "hoodie";
-    } else {
-      return await aiFallbackAnswer({
-        question: text,
-        sessionSummary: "العميل لسه بيختار المنتج",
-      });
-    }
-
-    session.step = "size";
-    return `تمام 👍  
-المقاسات المتاحة: ${catalog.categories[session.product].sizes.join(" / ")}
-ابعِت المقاس`;
-  }
-
-  /* ================= SIZE ================= */
-  if (session.step === "size") {
-    if (!catalog.categories[session.product].sizes.includes(text)) {
-      return "المقاس ده مش متاح ❌ ابعت M أو L أو XL";
-    }
-
-    session.size = text;
-    session.step = "color";
-    return `حلو 👌  
-الألوان المتاحة: ${catalog.categories[session.product].colors.join(" / ")}
-تحب لون ايه؟`;
-  }
-
-  /* ================= COLOR ================= */
-  if (session.step === "color") {
-    if (!catalog.categories[session.product].colors.includes(text)) {
-      return "اللون ده مش متاح ❌ اختار من المتاح";
-    }
-
-    session.color = text;
-    session.step = "confirm";
-
-    const price = catalog.categories[session.product].price;
-
-    return `✅ تأكيد الطلب:
-- المنتج: ${session.product === "tshirt" ? "تيشيرت" : "هودي"}
-- المقاس: ${session.size}
-- اللون: ${session.color}
-- السعر: ${price} جنيه
-- ${FAQ.shipping_price}
-
-اكتب *تأكيد* عشان نكمل 📝`;
-  }
-
-  /* ================= CONFIRM ================= */
-  if (session.step === "confirm") {
-    if (text.includes("تأكيد")) {
-      session.step = "done";
-      return "🎉 تم تأكيد الطلب  
-ابعت الاسم ورقم الموبايل والعنوان 📦";
-    }
-
-    return "لو حابب تعدل حاجة قول ✏️ أو اكتب *تأكيد*";
-  }
-
-  /* ================= FALLBACK ================= */
-  return await aiFallbackAnswer({
-    question: text,
-    sessionSummary: `العميل اختار ${session.product}, مقاس ${session.size}, لون ${session.color}`,
-  });
+function now() {
+  return Date.now();
 }
+
+function getSession(userId) {
+  const s = sessions.get(userId);
+  if (!s) return null;
+  if (s.expiresAt <= now()) {
+    sessions.delete(userId);
+    return null;
+  }
+  return s;
+}
+
+function setSession(userId, data) {
+  sessions.set(userId, { ...data, expiresAt: now() + SESSION_TTL_MS });
+}
+
+function resetSession(userId) {
+  sessions.delete(userId);
+}
+
+/** Utils */
+function norm(txt = "") {
+  return String(txt)
+    .trim()
+    .replace(/\s+/g, " ")
+    .toLowerCase();
+}
+
+function hasAny(text, arr) {
+  return arr.some((w) => text.includes(w));
+}
+
+function isSizeToken(t) {
+  const x = t.toUpperCase();
+  return ["S", "M", "L", "XL", "XXL"].includes(x);
+}
+
+function extractSize(text) {
+  const tokens = String(text).toUpperCase().split(/[\s,\/-]+/);
+  const found = tokens.find((t) => isSizeToken(t));
+  return found || null;
+}
+
+function extractColor(text) {
+  const t = norm(text);
+  if (t.includes("اسود") || t.includes("أسود")) return "أسود";
+  if (t.includes("ابيض") || t.includes("أبيض")) return "أبيض";
+  if (t.includes("كحلي")) return "كحلي";
+  if (t.includes("رمادي") || t.includes("رمادى")) return "رمادي";
+  return null;
+}
+
+function extractProduct(text) {
+  const t = norm(text);
+  // منتجاتك الحالية في الكتالوج: tshirt + hoodie
+  if (hasAny(t, ["تيشيرت", "tshirt", "تي شيرت"])) return "tshirt";
+  if (hasAny(t, ["هودي", "hoodie", "هودى"])) return "hoodie";
+  return null;
+}
+
+function formatProductCard(productKey) {
+  const p = catalog?.categories?.[productKey];
+  if (!p) return null;
+
+  const nameAr = productKey === "tshirt" ? "تيشيرت" : productKey === "hoodie" ? "هودي" : productKey;
+
+  const sizes = Array.isArray(p.sizes) ? p.sizes.join(" / ") : "";
+  const colors = Array.isArray(p.colors) ? p.colors.join(" / ") : "";
+
+  return (
+    `📦 ${nameAr}\n` +
+    `💰 السعر: ${p.price} جنيه\n` +
+    `📏 المقاسات: ${sizes}\n` +
+    `🎨 الألوان: ${colors}\n\n` +
+    `تحب تطلب؟ ابعت المقاس واللون 👌`
+  );
+}
+
+function formatFAQ(key) {
+  const v = FAQ?.[key];
+  if (!v) return null;
+  return `✅ ${v}`;
+}
+
+/**
+ * ✅ الرد الرئيسي اللي queue.js بيناديه
+ * @param {Object} args
+ * @param {string} args.senderId
+ * @param {string} args.text
+ * @returns {string} reply
+ */
+export async function salesReply({ senderId, text }) {
+  const raw = String(text || "");
+  const t = norm(raw);
+
+  // تنظيف sessions القديمة بشكل بسيط
+  // (مش ضروري قوي بس يساعد)
+  if (Math.random() < 0.01) {
+    for (const [k, s] of sessions.entries()) {
+      if (s.expiresAt <= now()) sessions.delete(k);
+    }
+  }
+
+  // أوامر عامة
+  if (hasAny(t, ["ابدأ من جديد", "ريست", "reset", "start over", "الغاء", "إلغاء"])) {
+    resetSession(senderId);
+    return "تمام ✅ رجّعنا من الأول. تحب **تيشيرت** ولا **هودي**؟";
+  }
+
+  // FAQ
+  if (hasAny(t, ["سعر الشحن", "الشحن", "توصيل", "shipping"])) {
+    return formatFAQ("shipping_price") || "سعر الشحن: 50 جنيه لكل المحافظات.";
+  }
+  if (hasAny(t, ["مدة التوصيل", "يوصل امتى", "يوصل في قد ايه", "delivery"])) {
+    return formatFAQ("delivery_time") || "مدة التوصيل عادة من 2 لـ 4 أيام عمل حسب المحافظة.";
+  }
+  if (hasAny(t, ["الدفع", "payment", "كاش", "عند الاستلام"])) {
+    return formatFAQ("payment") || "الدفع عند الاستلام متاح ✅";
+  }
+  if (hasAny(t, ["استبدال", "استرجاع", "exchange", "return"])) {
+    return formatFAQ("exchange") || "الاستبدال خلال 14 يوم بشرط المنتج يكون بحالته ✅";
+  }
+
+  // “أسعار” أو “المنتجات”
+  if (hasAny(t, ["اسعار", "الأسعار", "المنتجات", "catalog", "كتالوج"])) {
+    const tshirt = formatProductCard("tshirt");
+    const hoodie = formatProductCard("hoodie");
+    return (
+      `تمام ✅ دي المنتجات المتاحة:\n\n` +
+      `${tshirt}\n\n` +
+      `${hoodie}\n\n` +
+      `قولّي عايز انهي واحد؟ (تيشيرت / هودي)`
+    );
+  }
+
+  // Session flow
+  const session = getSession(senderId) || {
+    step: "choose_product", // choose_product -> choose_size -> choose_color -> confirm -> phone -> address -> done
+    order: {
+      product: null,
+      size: null,
+      color: null,
+      phone: null,
+      address: null,
+    },
+  };
+
+  // لو المستخدم كتب منتج مباشرة
+  const detectedProduct = extractProduct(raw);
+  const detectedSize = extractSize(raw);
+  const detectedColor = extractColor(raw);
+
+  // Shortcut: لو كتب “تيشيرت” فقط
+  if (session.step === "choose_product") {
+    if (detectedProduct) {
+      session.order.product = detectedProduct;
+      session.step = "choose_size";
+      setSession(senderId, session);
+      const nameAr = detectedProduct === "tshirt" ? "تيشيرت" : "هودي";
+      return `تمام ✅ اخترت ${nameAr}. ابعت المقاس (M / L / XL)`;
+    }
+
+    return "تمام ✅ بس قولّي تحب **تيشيرت** ولا **هودي**؟";
+  }
+
+  // اختيار المقاس
+  if (session.step === "choose_size") {
+    if (detectedSize) {
+      session.order.size = detectedSize;
+      session.step = "choose_color";
+      setSession(senderId, session);
+      return "تمام ✅ اللون إيه؟ (أسود / أبيض / كحلي)";
+    }
+
+    // لو كتب لون وهو لسه في المقاس
+    if (detectedColor) {
+      return "وصلت اللون ✅ بس محتاج المقاس الأول (M / L / XL).";
+    }
+
+    return "ممكن تبعت المقاس بشكل واضح؟ مثال: M أو L أو XL";
+  }
+
+  // اختيار اللون
+  if (session.step === "choose_color") {
+    if (detectedColor) {
+      session.order.color = detectedColor;
+      session.step = "confirm";
+      setSession(senderId, session);
+
+      const productAr = session.order.product === "tshirt" ? "تيشيرت" : "هودي";
+      return (
+        `✅ تأكيد الطلب:\n`
