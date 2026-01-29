@@ -1,50 +1,41 @@
 // ai.js
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
+import fetch from "node-fetch";
 
-export async function askAI({ system, user, meta = {} }) {
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+const MODEL = "models/gemini-1.5-pro"; // ✅ ده الموجود حاليًا
+
+export async function aiReply({ system, user }) {
   if (!GEMINI_API_KEY) {
-    console.warn("⚠️ GEMINI_API_KEY missing");
-    return "";
+    throw new Error("GEMINI_API_KEY missing");
   }
 
-  // Gemini endpoint (v1beta generateContent)
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_API_KEY}`;
-
-  const payload = {
-    contents: [
-      {
-        role: "user",
-        parts: [
-          { text: `SYSTEM:\n${system}\n\nUSER:\n${user}\n\nMETA:\n${JSON.stringify(meta)}` },
-        ],
-      },
-    ],
-    generationConfig: {
-      temperature: 0.7,
-      maxOutputTokens: 300,
-    },
-  };
-
-  try {
-    const r = await fetch(url, {
+  const res = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/${MODEL}:generateContent?key=${GEMINI_API_KEY}`,
+    {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-
-    if (!r.ok) {
-      const t = await r.text();
-      console.error("❌ Gemini error:", r.status, t);
-      return "";
+      body: JSON.stringify({
+        contents: [
+          {
+            role: "user",
+            parts: [
+              { text: system + "\n\n" + user }
+            ]
+          }
+        ]
+      })
     }
+  );
 
-    const data = await r.json();
-    const text =
-      data?.candidates?.[0]?.content?.parts?.map((p) => p.text).join("") || "";
+  const data = await res.json();
 
-    return text;
-  } catch (e) {
-    console.error("❌ askAI exception:", e.message);
-    return "";
+  if (!res.ok) {
+    console.error("❌ Gemini error:", JSON.stringify(data, null, 2));
+    throw new Error("Gemini request failed");
   }
+
+  return (
+    data.candidates?.[0]?.content?.parts?.[0]?.text ||
+    "تحب أساعدك في اختيار المقاس؟ 😊"
+  );
 }
