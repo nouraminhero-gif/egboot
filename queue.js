@@ -9,7 +9,7 @@ const REDIS_URL =
   null;
 
 if (!REDIS_URL) {
-  console.error("❌ REDIS_PUBLIC_URL/REDIS_URL not found in environment variables");
+  console.error("❌ REDIS_URL / REDIS_PUBLIC_URL not found in env");
 }
 
 export const redis = REDIS_URL
@@ -17,13 +17,15 @@ export const redis = REDIS_URL
       maxRetriesPerRequest: 1,
       enableReadyCheck: false,
       retryStrategy(times) {
-        if (times > 3) return null; // يمنع restart loop
+        // مهم عشان Railway ما يعملش restart loop
+        if (times > 3) return null;
         return Math.min(times * 500, 2000);
       },
     })
   : null;
 
 redis?.on("connect", () => console.log("✅ Redis connected"));
+redis?.on("ready", () => console.log("✅ Redis ready"));
 redis?.on("error", (err) => console.error("❌ Redis error:", err.message));
 
 // ================== Queue Config ==================
@@ -36,6 +38,7 @@ export async function enqueueIncomingMessage(payload) {
     console.warn("⚠️ enqueue skipped: redis not available");
     return;
   }
+
   try {
     await redis.rpush(QUEUE_KEY, JSON.stringify(payload));
   } catch (err) {
@@ -65,23 +68,35 @@ export async function startWorker({ pageAccessToken }) {
         if (!data) continue;
 
         const [, raw] = data;
-        const job = JSON.parse(raw);
+        const job = safeJsonParse(raw);
+        if (!job) continue;
 
-        await handleJob(job, pageAccessToken);
+        await handleMessage(job, pageAccessToken);
       } catch (err) {
-        console.error("❌ Worker error:", err.message);
+        console.error("❌ Worker error:", err?.message || err);
         await sleep(1000);
       }
     }
   })();
 }
 
-// ================== Job Handler ==================
-async function handleJob(job, pageAccessToken) {
+// ================== Message Handler ==================
+async function handleMessage(job, pageAccessToken) {
   const event = job?.event;
   if (!event) return;
 
-  // Message
+  // (اختياري) منع تكرار نفس الرسالة لو في retries من FB
+  // بيعتمد على message.mid
+  const mid = event?.message?.mid;
+  if (mid) {
+    const seen = await markIfSeen(mid);
+    if (seen) {
+      console.log("🔁 Duplicate message skipped:", mid);
+      return;
+    }
+  }
+
+  // Message Text
   if (event.message?.text) {
     const senderId = event.sender?.id;
     const text = event.message.text;
@@ -90,12 +105,8 @@ async function handleJob(job, pageAccessToken) {
 
     console.log("📩 Message:", senderId, text);
 
-    // ✅ هنا بقى الرد ييجي من sales.js
-    const reply = await salesReply({
-      text,
-      senderId,
-      storeId: "default",
-    });
+    // ✅ رد بيعي (مرحلة A)
+    const reply = await salesReply(text, senderId);
 
     await sendTextMessage(senderId, reply, pageAccessToken);
     return;
@@ -103,7 +114,25 @@ async function handleJob(job, pageAccessToken) {
 
   // Postback
   if (event.postback) {
-    console.log("📦 Postback:", event.postback.payload);
+    console.log("📦 Postback:", event.postback?.payload || "");
+  }
+}
+
+// ================== Dedupe (optional) ==================
+async function markIfSeen(mid) {
+  if (!redis) return false;
+
+  const key = `seen:${mid}`;
+
+  // SET key "1" NX EX 600  => 10 دقائق
+  // لو اتعمل set لأول مرة => return false (مش مكرر)
+  // لو كان موجود => return true (مكرر)
+  try {
+    const res = await redis.set(key, "1", "NX", "EX", 600);
+    return res !== "OK";
+  } catch (e) {
+    // لو حصل أي مشكلة في الديدوب، ما نكسرش السيستم
+    return false;
   }
 }
 
@@ -114,6 +143,7 @@ async function sendTextMessage(psid, text, token) {
     return;
   }
 
+  // Node 22 فيه fetch built-in، فمش محتاج node-fetch
   try {
     const r = await fetch(
       `https://graph.facebook.com/v18.0/me/messages?access_token=${token}`,
@@ -127,16 +157,25 @@ async function sendTextMessage(psid, text, token) {
       }
     );
 
+    const data = await r.json().catch(() => ({}));
     if (!r.ok) {
-      const body = await r.text();
-      console.error("❌ FB send failed:", r.status, body);
+      console.error("❌ FB send error:", r.status, data);
     }
   } catch (err) {
-    console.error("❌ Send message error:", err.message);
+    console.error("❌ Send message error:", err?.message || err);
   }
 }
 
 // ================== Utils ==================
 function sleep(ms) {
   return new Promise((res) => setTimeout(res, ms));
+}
+
+function safeJsonParse(str) {
+  try {
+    return JSON.parse(str);
+  } catch {
+    console.error("❌ Bad JSON job:", str?.slice?.(0, 200));
+    return null;
+  }
 }
