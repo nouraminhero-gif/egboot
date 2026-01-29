@@ -1,101 +1,94 @@
 // sales.js
-import { aiFallbackAnswer } from "./ai.js";
 import { catalog } from "./brain/catalog.js";
+import { FAQ } from "./brain/faq.js";
+import { aiFallbackAnswer } from "./ai.js";
 
-const sessions = new Map(); // SaaS حقيقي: خليه Redis/DB بعدين
+/**
+ * session example:
+ * {
+ *   step: "product" | "size" | "color" | "confirm",
+ *   product: null,
+ *   size: null,
+ *   color: null
+ * }
+ */
 
-function getSession(userId) {
-  if (!sessions.has(userId)) {
-    sessions.set(userId, {
-      step: "product", // product -> size -> color -> confirm -> phone -> address
-      cart: {},
-    });
-  }
-  return sessions.get(userId);
-}
+export async function salesReply(message, session) {
+  const text = message.trim();
 
-function normalize(t) {
-  return (t || "").toString().trim().toLowerCase();
-}
-
-function isValidSize(t) {
-  return ["m", "l", "xl"].includes(normalize(t));
-}
-
-function isValidColor(t) {
-  const x = normalize(t);
-  return ["اسود", "أبيض", "ابيض", "كحلي", "رمادي"].includes(x);
-}
-
-function isConfirm(t) {
-  const x = normalize(t);
-  return ["تأكيد", "تاكيد", "confirm"].map(normalize).includes(x);
-}
-
-function isOutOfFlow(text, session) {
-  const t = normalize(text);
-
-  if (session.step === "size" && !isValidSize(t)) return true;
-  if (session.step === "color" && !isValidColor(t)) return true;
-  if (session.step === "confirm" && !isConfirm(t)) return true;
-
-  return false;
-}
-
-function stepPrompt(session) {
-  if (session.step === "size") return "تمام ✅ ابعت المقاس: M / L / XL";
-  if (session.step === "color") return "تمام ✅ ابعت اللون: أسود / أبيض / كحلي";
-  if (session.step === "confirm") return "لو تحب نكمّل اكتب *تأكيد* ✅";
-  return "قولّي تحب تيشيرت ولا هودي؟";
-}
-
-export async function salesReply({ senderId, text, send }) {
-  const session = getSession(senderId);
-
-  // ✅ لو السؤال برة الفلو → AI fallback
-  if (isOutOfFlow(text, session)) {
-    const sessionSummary = `العميل في خطوة: ${session.step}، الطلب الحالي: ${JSON.stringify(
-      session.cart
-    )}`;
-
-    const ai = await aiFallbackAnswer({
-      question: text,
-      sessionSummary,
-    });
-
-    await send(ai.answer);
-    // ✅ رجّعه لنفس الخطوة
-    await send(stepPrompt(session));
-    return;
+  // لو مفيش session نبدأ من الأول
+  if (!session.step) {
+    session.step = "product";
+    return "تحب تطلب ايه؟ 👕 تيشيرت ولا 🧥 هودي؟";
   }
 
-  // ✅ الفلو الأساسي (مختصر مثال)
+  /* ================= PRODUCT ================= */
   if (session.step === "product") {
-    session.cart.product = text;
+    if (text.includes("تيشير")) {
+      session.product = "tshirt";
+    } else if (text.includes("هودي")) {
+      session.product = "hoodie";
+    } else {
+      return await aiFallbackAnswer({
+        question: text,
+        sessionSummary: "العميل لسه بيختار المنتج",
+      });
+    }
+
     session.step = "size";
-    await send("تمام ✅ اختر المقاس: M / L / XL");
-    return;
+    return `تمام 👍  
+المقاسات المتاحة: ${catalog.categories[session.product].sizes.join(" / ")}
+ابعِت المقاس`;
   }
 
+  /* ================= SIZE ================= */
   if (session.step === "size") {
-    session.cart.size = normalize(text).toUpperCase();
+    if (!catalog.categories[session.product].sizes.includes(text)) {
+      return "المقاس ده مش متاح ❌ ابعت M أو L أو XL";
+    }
+
+    session.size = text;
     session.step = "color";
-    await send("تمام ✅ اختر اللون: أسود / أبيض / كحلي");
-    return;
+    return `حلو 👌  
+الألوان المتاحة: ${catalog.categories[session.product].colors.join(" / ")}
+تحب لون ايه؟`;
   }
 
+  /* ================= COLOR ================= */
   if (session.step === "color") {
-    session.cart.color = text;
+    if (!catalog.categories[session.product].colors.includes(text)) {
+      return "اللون ده مش متاح ❌ اختار من المتاح";
+    }
+
+    session.color = text;
     session.step = "confirm";
-    await send(
-      `✅ تأكيد الطلب:\n- المنتج: ${session.cart.product}\n- المقاس: ${session.cart.size}\n- اللون: ${session.cart.color}\nاكتب *تأكيد* عشان نكمّل`
-    );
-    return;
+
+    const price = catalog.categories[session.product].price;
+
+    return `✅ تأكيد الطلب:
+- المنتج: ${session.product === "tshirt" ? "تيشيرت" : "هودي"}
+- المقاس: ${session.size}
+- اللون: ${session.color}
+- السعر: ${price} جنيه
+- ${FAQ.shipping_price}
+
+اكتب *تأكيد* عشان نكمل 📝`;
   }
 
+  /* ================= CONFIRM ================= */
   if (session.step === "confirm") {
-    await send("تم ✅ استلمت التأكيد. ابعت رقم الموبايل 📱");
-    session.step = "phone";
-    return;
+    if (text.includes("تأكيد")) {
+      session.step = "done";
+      return "🎉 تم تأكيد الطلب  
+ابعت الاسم ورقم الموبايل والعنوان 📦";
+    }
+
+    return "لو حابب تعدل حاجة قول ✏️ أو اكتب *تأكيد*";
   }
+
+  /* ================= FALLBACK ================= */
+  return await aiFallbackAnswer({
+    question: text,
+    sessionSummary: `العميل اختار ${session.product}, مقاس ${session.size}, لون ${session.color}`,
+  });
 }
