@@ -1,32 +1,50 @@
-import { GoogleGenerativeAI } from "@google/generative-ai";
-import { buildSalesContext } from "./sales.js";
+// ai.js
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
 
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-
-const genAI = GEMINI_API_KEY ? new GoogleGenerativeAI(GEMINI_API_KEY) : null;
-
-export async function askAI(userText) {
-  // ✅ fallback لو مفيش مفتاح
-  if (!genAI) {
-    return "ثواني براجع السيستم 🤍\nقولي محتاج تيشيرت ولا هودي ولا بنطلون؟";
+export async function askAI({ system, user, meta = {} }) {
+  if (!GEMINI_API_KEY) {
+    console.warn("⚠️ GEMINI_API_KEY missing");
+    return "";
   }
 
-  const system = buildSalesContext(userText);
+  // Gemini endpoint (v1beta generateContent)
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_API_KEY}`;
+
+  const payload = {
+    contents: [
+      {
+        role: "user",
+        parts: [
+          { text: `SYSTEM:\n${system}\n\nUSER:\n${user}\n\nMETA:\n${JSON.stringify(meta)}` },
+        ],
+      },
+    ],
+    generationConfig: {
+      temperature: 0.7,
+      maxOutputTokens: 300,
+    },
+  };
 
   try {
-    const model = genAI.getGenerativeModel({
-      model: "gemini-1.5-flash",
-      systemInstruction: system
+    const r = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
     });
 
-    const result = await model.generateContent(userText);
-    const reply = result?.response?.text?.() || "";
+    if (!r.ok) {
+      const t = await r.text();
+      console.error("❌ Gemini error:", r.status, t);
+      return "";
+    }
 
-    // ✅ fallback لو رد فاضي
-    return reply.trim() || "تمام 🤍 قولي تحب تيشيرت ولا هودي ولا بنطلون؟";
-  } catch (err) {
-    console.error("Gemini error:", err?.message);
-    // ✅ Graceful degradation
-    return "ثواني براجع السيستم 🤍\nقولي عايز تيشيرت ولا هودي ولا بنطلون؟";
+    const data = await r.json();
+    const text =
+      data?.candidates?.[0]?.content?.parts?.map((p) => p.text).join("") || "";
+
+    return text;
+  } catch (e) {
+    console.error("❌ askAI exception:", e.message);
+    return "";
   }
 }
