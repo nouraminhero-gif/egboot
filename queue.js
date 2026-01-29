@@ -1,5 +1,6 @@
 // queue.js
 import Redis from "ioredis";
+import { salesReply } from "./sales.js";
 
 // ================== Redis Connection ==================
 const REDIS_URL =
@@ -16,24 +17,14 @@ export const redis = REDIS_URL
       maxRetriesPerRequest: 1,
       enableReadyCheck: false,
       retryStrategy(times) {
-        // لو Redis مش راضي يتصل، متعملش crash loop لا نهائي على Railway
-        if (times > 3) return null;
+        if (times > 3) return null; // يمنع restart loop
         return Math.min(times * 500, 2000);
       },
     })
   : null;
 
-redis?.on("connect", () => {
-  console.log("✅ Redis connected");
-});
-
-redis?.on("ready", () => {
-  console.log("✅ Redis ready");
-});
-
-redis?.on("error", (err) => {
-  console.error("❌ Redis error:", err?.message || err);
-});
+redis?.on("connect", () => console.log("✅ Redis connected"));
+redis?.on("error", (err) => console.error("❌ Redis error:", err.message));
 
 // ================== Queue Config ==================
 const QUEUE_KEY = "egboot:incoming_messages";
@@ -45,11 +36,10 @@ export async function enqueueIncomingMessage(payload) {
     console.warn("⚠️ enqueue skipped: redis not available");
     return;
   }
-
   try {
     await redis.rpush(QUEUE_KEY, JSON.stringify(payload));
   } catch (err) {
-    console.error("❌ enqueue error:", err?.message || err);
+    console.error("❌ enqueue error:", err.message);
   }
 }
 
@@ -77,17 +67,17 @@ export async function startWorker({ pageAccessToken }) {
         const [, raw] = data;
         const job = JSON.parse(raw);
 
-        await handleMessage(job, pageAccessToken);
+        await handleJob(job, pageAccessToken);
       } catch (err) {
-        console.error("❌ Worker error:", err?.message || err);
+        console.error("❌ Worker error:", err.message);
         await sleep(1000);
       }
     }
   })();
 }
 
-// ================== Message Handler ==================
-async function handleMessage(job, pageAccessToken) {
+// ================== Job Handler ==================
+async function handleJob(job, pageAccessToken) {
   const event = job?.event;
   if (!event) return;
 
@@ -100,55 +90,20 @@ async function handleMessage(job, pageAccessToken) {
 
     console.log("📩 Message:", senderId, text);
 
-    // ✨ AI Reply (Gemini)
-    const reply = await getAIReply(text);
+    // ✅ هنا بقى الرد ييجي من sales.js
+    const reply = await salesReply({
+      text,
+      senderId,
+      storeId: "default",
+    });
 
-    // Send back
     await sendTextMessage(senderId, reply, pageAccessToken);
+    return;
   }
 
   // Postback
   if (event.postback) {
     console.log("📦 Postback:", event.postback.payload);
-  }
-}
-
-// ================== Gemini AI ==================
-async function getAIReply(userText) {
-  const key = process.env.GEMINI_API_KEY;
-  if (!key) {
-    return "GEMINI_API_KEY مش موجود على السيرفر ❌";
-  }
-
-  // Prompt بسيط للبيع (تقدر توسّعه)
-  const prompt = `
-أنت بوت مبيعات مصري اسمه Egboot.
-ردودك قصيرة وواضحة وبتقفل بيع بهدوء.
-العميل قال: "${userText}"
-رد عليه رد مناسب، وفي آخر الرد اسأل سؤال واحد بس.
-`;
-
-  try {
-    const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=${key}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: prompt }] }],
-        }),
-      }
-    );
-
-    const data = await res.json();
-
-    const text =
-      data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
-
-    return text || "ممكن توضحلي أكتر؟ 🤔";
-  } catch (err) {
-    console.error("❌ Gemini error:", err?.message || err);
-    return "حصل مشكلة بسيطة.. جرّب تاني 🙏";
   }
 }
 
@@ -160,7 +115,7 @@ async function sendTextMessage(psid, text, token) {
   }
 
   try {
-    await fetch(
+    const r = await fetch(
       `https://graph.facebook.com/v18.0/me/messages?access_token=${token}`,
       {
         method: "POST",
@@ -171,8 +126,13 @@ async function sendTextMessage(psid, text, token) {
         }),
       }
     );
+
+    if (!r.ok) {
+      const body = await r.text();
+      console.error("❌ FB send failed:", r.status, body);
+    }
   } catch (err) {
-    console.error("❌ Send message error:", err?.message || err);
+    console.error("❌ Send message error:", err.message);
   }
 }
 
