@@ -1,7 +1,7 @@
 import express from "express";
 import "dotenv/config";
 import { PrismaClient } from "@prisma/client";
-import Redis from "ioredis";
+import IORedis from "ioredis";
 import { Queue, Worker } from "bullmq";
 import { z } from "zod";
 
@@ -18,17 +18,32 @@ const prisma = new PrismaClient();
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const PORT = process.env.PORT || 8080;
 
-const redis = new Redis(process.env.REDIS_URL);
-const queue = new Queue("messages", { connection: redis });
+// ✅ BullMQ needs maxRetriesPerRequest: null on Railway/Upstash
+if (!process.env.REDIS_URL) {
+  console.warn("⚠️ Missing REDIS_URL. Queue/Worker will not run.");
+}
+
+// ✅ connection مخصوص لبولMQ
+const connection = process.env.REDIS_URL
+  ? new IORedis(process.env.REDIS_URL, {
+      maxRetriesPerRequest: null,
+      enableReadyCheck: false
+    })
+  : null;
+
+const queue = connection ? new Queue("messages", { connection }) : null;
 
 // Dedup cache (in-memory سريع)
 const processed = new Set();
 setInterval(() => processed.clear(), 5 * 60 * 1000);
 
 // ======================= AUTH (MVP) =======================
-// Admin create tenant user / tenant login
 app.post("/api/auth/register", async (req, res) => {
-  const schema = z.object({ email: z.string().email(), password: z.string().min(6), tenantName: z.string().min(2) });
+  const schema = z.object({
+    email: z.string().email(),
+    password: z.string().min(6),
+    tenantName: z.string().min(2)
+  });
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "Invalid body" });
 
@@ -93,7 +108,10 @@ app.put("/api/me/tenant", requireAuth(), async (req, res) => {
 // ======================= PRODUCTS =======================
 app.get("/api/me/products", requireAuth(), async (req, res) => {
   const tenantId = req.user.tenantId;
-  const products = await prisma.product.findMany({ where: { tenantId }, orderBy: { createdAt: "desc" } });
+  const products = await prisma.product.findMany({
+    where: { tenantId },
+    orderBy: { createdAt: "desc" }
+  });
   res.json({ products });
 });
 
@@ -115,10 +133,13 @@ app.post("/api/me/products", requireAuth(), async (req, res) => {
 });
 
 // ======================= PAGES (ربط الفيسبوك MVP) =======================
-// MVP: العميل يحط pageId + pageAccessToken يدوي من التطبيق
+// MVP: العميل يحط pageId + pageAccessToken يدوي
 app.get("/api/me/pages", requireAuth(), async (req, res) => {
   const tenantId = req.user.tenantId;
-  const pages = await prisma.page.findMany({ where: { tenantId }, orderBy: { createdAt: "desc" } });
+  const pages = await prisma.page.findMany({
+    where: { tenantId },
+    orderBy: { createdAt: "desc" }
+  });
   res.json({ pages });
 });
 
@@ -134,8 +155,17 @@ app.post("/api/me/pages", requireAuth(), async (req, res) => {
 
   const page = await prisma.page.upsert({
     where: { pageId: parsed.data.pageId },
-    update: { tenantId, pageName: parsed.data.pageName, accessToken: parsed.data.accessToken },
-    create: { tenantId, pageId: parsed.data.pageId, pageName: parsed.data.pageName, accessToken: parsed.data.accessToken }
+    update: {
+      tenantId,
+      pageName: parsed.data.pageName,
+      accessToken: parsed.data.accessToken
+    },
+    create: {
+      tenantId,
+      pageId: parsed.data.pageId,
+      pageName: parsed.data.pageName,
+      accessToken: parsed.data.accessToken
+    }
   });
 
   res.json({ page });
@@ -144,7 +174,11 @@ app.post("/api/me/pages", requireAuth(), async (req, res) => {
 // ======================= ORDERS =======================
 app.get("/api/me/orders", requireAuth(), async (req, res) => {
   const tenantId = req.user.tenantId;
-  const orders = await prisma.order.findMany({ where: { tenantId }, orderBy: { createdAt: "desc" }, take: 50 });
+  const orders = await prisma.order.findMany({
+    where: { tenantId },
+    orderBy: { createdAt: "desc" },
+    take: 50
+  });
   res.json({ orders });
 });
 
@@ -160,17 +194,21 @@ app.get("/webhook", (req, res) => {
 
 // ======================= WEBHOOK RECEIVE =======================
 app.post("/webhook", (req, res) => {
-  // الرد الفوري مهم جدًا
+  // ✅ رد فوري قبل أي معالجة
   res.status(200).send("EVENT_RECEIVED");
 
   const body = req.body;
   if (body.object !== "page") return;
+
+  // لو مفيش queue (REDIS_URL ناقص) نوقف بهدوء
+  if (!queue) return;
 
   for (const entry of body.entry || []) {
     const fbPageId = String(entry.id || "");
     for (const event of entry.messaging || []) {
       const psid = event.sender?.id;
       if (!psid) continue;
+
       if (event.message?.is_echo) continue;
 
       const text = event.message?.text?.trim();
@@ -198,107 +236,134 @@ app.post("/webhook", (req, res) => {
 app.get("/", (req, res) => res.status(200).send("✅ Egboot Platform running"));
 
 // ======================= WORKER (AI + DB + Send) =======================
-const worker = new Worker(
-  "messages",
-  async (job) => {
-    const { fbPageId, psid, mid, text, timestamp } = job.data;
+let worker = null;
 
-    // 1) Page -> Tenant
-    const page = await prisma.page.findUnique({ where: { pageId: fbPageId } });
-    if (!page) return;
+if (connection) {
+  worker = new Worker(
+    "messages",
+    async (job) => {
+      const { fbPageId, psid, mid, text, timestamp } = job.data;
 
-    const tenant = await prisma.tenant.findUnique({ where: { id: page.tenantId } });
-    if (!tenant) return;
+      // 1) Page -> Tenant
+      const page = await prisma.page.findUnique({ where: { pageId: fbPageId } });
+      if (!page) return;
 
-    // 2) Ensure conversation + session
-    const convo = await prisma.conversation.upsert({
-      where: { tenantId_pageId_psid: { tenantId: tenant.id, pageId: fbPageId, psid } },
-      update: {},
-      create: { tenantId: tenant.id, pageId: fbPageId, psid }
-    });
+      const tenant = await prisma.tenant.findUnique({ where: { id: page.tenantId } });
+      if (!tenant) return;
 
-    await prisma.message.create({
-      data: {
-        conversationId: convo.id,
-        direction: "in",
-        mid: mid || undefined,
-        text,
-        timestampMs: timestamp != null ? BigInt(timestamp) : undefined
-      }
-    });
+      // 2) Ensure conversation + session
+      const convo = await prisma.conversation.upsert({
+        where: {
+          tenantId_pageId_psid: { tenantId: tenant.id, pageId: fbPageId, psid }
+        },
+        update: {},
+        create: { tenantId: tenant.id, pageId: fbPageId, psid }
+      });
 
-    const session =
-      (await prisma.session.findUnique({ where: { conversationId: convo.id } })) ||
-      (await prisma.session.create({ data: { conversationId: convo.id } }));
-
-    // 3) Quick extraction (regex)
-    const extracted = extractOrderFields(text);
-
-    // 4) Load catalog
-    const products = await prisma.product.findMany({ where: { tenantId: tenant.id }, take: 50, orderBy: { createdAt: "desc" } });
-
-    // 5) AI build prompt
-    const systemPrompt = buildSalesSystemPrompt(tenant, products);
-    const userMessage = buildUserMessage(text, { ...session, ...extracted });
-
-    // typing on
-    await fbTyping(page.accessToken, psid, true);
-
-    const ai = await askAI({ systemPrompt, userMessage });
-
-    // typing off
-    await fbTyping(page.accessToken, psid, false);
-
-    // 6) Update session
-    const updates = { ...extracted, ...(ai.updates || {}) };
-    await prisma.session.update({
-      where: { conversationId: convo.id },
-      data: cleanUpdates(updates)
-    });
-
-    // 7) Send reply
-    const reply = ai.reply?.trim() || "ثواني براجع السيستم 🤍";
-    await fbSendText(page.accessToken, psid, reply);
-
-    await prisma.message.create({
-      data: { conversationId: convo.id, direction: "out", text: reply }
-    });
-
-    // 8) إذا اكتملت البيانات الأساسية اعمل Order Draft
-    const latestSession = await prisma.session.findUnique({ where: { conversationId: convo.id } });
-    const hasMinimum =
-      latestSession?.productName &&
-      latestSession?.size &&
-      latestSession?.color &&
-      latestSession?.city &&
-      latestSession?.phone;
-
-    if (hasMinimum) {
-      const product = products.find(p => p.name === latestSession.productName) || null;
-
-      const sheetText = buildOrderSheet({ tenant, session: latestSession, product });
-      // upsert draft order
-      await prisma.order.create({
+      await prisma.message.create({
         data: {
-          tenantId: tenant.id,
           conversationId: convo.id,
-          status: "draft",
-          sheetText
+          direction: "in",
+          mid: mid || undefined,
+          text,
+          timestampMs: timestamp != null ? BigInt(timestamp) : undefined
         }
-      }).catch(() => {});
-    }
-  },
-  { connection: redis, concurrency: 5 }
-);
+      });
 
-worker.on("failed", (job, err) => {
-  console.error("Worker failed:", job?.id, err?.message);
-});
+      const session =
+        (await prisma.session.findUnique({ where: { conversationId: convo.id } })) ||
+        (await prisma.session.create({ data: { conversationId: convo.id } }));
+
+      // 3) Quick extraction
+      const extracted = extractOrderFields(text);
+
+      // 4) Load catalog
+      const products = await prisma.product.findMany({
+        where: { tenantId: tenant.id },
+        take: 50,
+        orderBy: { createdAt: "desc" }
+      });
+
+      // 5) AI build prompt
+      const systemPrompt = buildSalesSystemPrompt(tenant, products);
+      const userMessage = buildUserMessage(text, { ...session, ...extracted });
+
+      // typing on
+      await fbTyping(page.accessToken, psid, true);
+
+      const ai = await askAI({ systemPrompt, userMessage });
+
+      // typing off
+      await fbTyping(page.accessToken, psid, false);
+
+      // 6) Update session
+      const updates = { ...extracted, ...(ai.updates || {}) };
+      await prisma.session.update({
+        where: { conversationId: convo.id },
+        data: cleanUpdates(updates)
+      });
+
+      // 7) Send reply
+      const reply = ai.reply?.trim() || "ثواني براجع السيستم 🤍";
+      await fbSendText(page.accessToken, psid, reply);
+
+      await prisma.message.create({
+        data: { conversationId: convo.id, direction: "out", text: reply }
+      });
+
+      // 8) Draft Order if minimum fields ready
+      const latestSession = await prisma.session.findUnique({
+        where: { conversationId: convo.id }
+      });
+
+      const hasMinimum =
+        latestSession?.productName &&
+        latestSession?.size &&
+        latestSession?.color &&
+        latestSession?.city &&
+        latestSession?.phone;
+
+      if (hasMinimum) {
+        const product = products.find((p) => p.name === latestSession.productName) || null;
+        const sheetText = buildOrderSheet({ tenant, session: latestSession, product });
+
+        // create a draft order (ignore duplicates)
+        await prisma.order
+          .create({
+            data: {
+              tenantId: tenant.id,
+              conversationId: convo.id,
+              status: "draft",
+              sheetText
+            }
+          })
+          .catch(() => {});
+      }
+    },
+    { connection, concurrency: 5 }
+  );
+
+  worker.on("failed", (job, err) => {
+    console.error("Worker failed:", job?.id, err?.message);
+  });
+}
 
 function cleanUpdates(u) {
-  const allowed = ["intent","productId","productName","size","color","city","address","phone","customerName"];
+  const allowed = [
+    "intent",
+    "productId",
+    "productName",
+    "size",
+    "color",
+    "city",
+    "address",
+    "phone",
+    "customerName"
+  ];
   const out = {};
-  for (const k of allowed) if (u[k] != null && String(u[k]).trim() !== "") out[k] = u[k];
+  for (const k of allowed) {
+    if (u[k] != null && String(u[k]).trim() !== "") out[k] = u[k];
+  }
   return out;
 }
 
