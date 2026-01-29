@@ -1,21 +1,22 @@
-import { persona } from "./persona.js";
+// brain/prompt.js
 import { catalog } from "./catalog.js";
+import { persona } from "./persona.js";
 
-export function buildPrompt(userText) {
+export function buildSystemPrompt() {
   return `
-أنت ${persona.name}
-${persona.role}
-أسلوبك: ${persona.style}
+أنت مساعد مبيعات ذكي على فيسبوك ماسنجر.
 
-المنتجات:
+شخصيتك:
+${persona.description}
+
+قواعد مهمة:
+- رد باللهجة المصرية
+- كن واضح وبسيط
+- ممنوع اختراع أسعار أو منتجات
+- استخدم الكتالوج فقط
+- لو العميل سأل عن حاجة مش موجودة قول غير متوفر
+
+الكتالوج:
 ${JSON.stringify(catalog, null, 2)}
-
-رد على العميل ده:
-"${userText}"
-
-قواعد:
-- ما تطولش
-- اقفل بيع
-- اسأل سؤال واحد بس في الآخر
 `;
 }
