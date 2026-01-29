@@ -24,6 +24,11 @@ app.get("/", (req, res) => {
   res.status(200).send("OK ✅");
 });
 
+// Optional (لو حابب)
+app.get("/health", (req, res) => {
+  res.status(200).json({ ok: true });
+});
+
 // ================== Facebook Webhook Verify (GET) ==================
 app.get("/webhook", (req, res) => {
   const mode = req.query["hub.mode"];
@@ -40,25 +45,25 @@ app.get("/webhook", (req, res) => {
 });
 
 // ================== Facebook Webhook Events (POST) ==================
-app.post("/webhook", async (req, res) => {
+app.post("/webhook", (req, res) => {
+  // لازم نرد 200 بسرعة عشان FB ما يعيدش الارسال
+  res.sendStatus(200);
+
   try {
     const body = req.body;
-
-    // لازم نرد 200 بسرعة عشان FB ما يعيدش الارسال
-    res.sendStatus(200);
-
-    if (body.object !== "page") return;
+    if (body?.object !== "page") return;
 
     const entries = body.entry || [];
     for (const entry of entries) {
       const events = entry.messaging || [];
       for (const event of events) {
-        // بنرمي كل event في الـ Queue
-        await enqueueIncomingMessage({ event });
+        // ✅ مهم: ما تعملش await هنا عشان ما تبطّأش
+        enqueueIncomingMessage({ event }).catch((err) => {
+          console.error("❌ enqueue failed:", err?.message || err);
+        });
       }
     }
   } catch (err) {
-    // حتى لو حصل error هنا، احنا أصلاً رجعنا 200
     console.error("❌ webhook post error:", err?.message || err);
   }
 });
@@ -67,6 +72,10 @@ app.post("/webhook", async (req, res) => {
 app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
 
-  // شغل Worker مرة واحدة
+  // Log missing env (مهم للتشخيص)
+  if (!VERIFY_TOKEN) console.warn("⚠️ VERIFY_TOKEN is missing");
+  if (!PAGE_ACCESS_TOKEN) console.warn("⚠️ PAGE_ACCESS_TOKEN is missing");
+
+  // ✅ شغل Worker مرة واحدة
   startWorker({ pageAccessToken: PAGE_ACCESS_TOKEN });
 });
