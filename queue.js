@@ -1,90 +1,91 @@
 import { Queue, Worker } from "bullmq";
+import IORedis from "ioredis";
 
 const REDIS_URL = process.env.REDIS_URL;
 
-if (!REDIS_URL) {
-  console.warn("⚠️ Missing REDIS_URL. Queue/Worker disabled.");
-}
-
-const connection = REDIS_URL || null;
-
-// Queue instance
+// Redis client (lazy init)
+let redis = null;
 let messageQueue = null;
-
-// Worker instance
 let worker = null;
 
-/**
- * Create queue (lazy init)
- */
+function getRedis() {
+  if (!REDIS_URL) return null;
+  if (redis) return redis;
+
+  // IMPORTANT: BullMQ recommends maxRetriesPerRequest = null
+  redis = new IORedis(REDIS_URL, {
+    maxRetriesPerRequest: null,
+    enableReadyCheck: false,
+  });
+
+  redis.on("connect", () => console.log("✅ Redis connected"));
+  redis.on("error", (err) => console.error("❌ Redis error:", err?.message || err));
+
+  return redis;
+}
+
 function getQueue() {
-  if (!connection) return null;
+  const r = getRedis();
+  if (!r) return null;
+
   if (!messageQueue) {
     messageQueue = new Queue("messages", {
-      connection,
+      connection: r,
       defaultJobOptions: {
         removeOnComplete: true,
         removeOnFail: false,
       },
     });
   }
+
   return messageQueue;
 }
 
 /**
- * ✅ Exported: enqueueIncomingMessage
- * server.js expects this name
+ * server.js expects: enqueueIncomingMessage
  */
 export async function enqueueIncomingMessage(payload) {
   const q = getQueue();
 
-  // لو مفيش Redis شغال، منوقفش السيرفر
+  // لو Redis مش موجود/مش مربوط… منوقعش السيرفر
   if (!q) {
-    console.warn("⚠️ Queue not available (no REDIS_URL). Payload skipped.");
+    console.warn("⚠️ REDIS_URL missing -> queue skipped");
     return { skipped: true };
   }
 
-  // jobName ثابت + payload كله
   const job = await q.add("incoming_message", payload);
   return { jobId: job.id };
 }
 
 /**
- * ✅ Exported: startWorker
- * server.js expects this name
+ * server.js expects: startWorker
  */
 export function startWorker(handler) {
-  if (!connection) {
-    console.warn("⚠️ Worker not started (no REDIS_URL).");
+  const r = getRedis();
+
+  if (!r) {
+    console.warn("⚠️ REDIS_URL missing -> worker not started");
     return null;
   }
 
-  // منع تشغيل Worker مرتين
   if (worker) return worker;
 
   worker = new Worker(
     "messages",
     async (job) => {
-      // لو server.js باعت handler هنستخدمه
-      // handler(payload) => returns response maybe
       if (typeof handler === "function") {
         return await handler(job.data);
       }
-
-      // fallback لو مفيش handler
       console.log("📩 Job received:", job.data);
       return true;
     },
-    { connection }
+    { connection: r }
   );
 
-  worker.on("completed", (job) => {
-    console.log(`✅ Job ${job.id} completed`);
-  });
-
-  worker.on("failed", (job, err) => {
-    console.error(`❌ Job ${job?.id} failed:`, err.message);
-  });
+  worker.on("completed", (job) => console.log(`✅ Job ${job.id} completed`));
+  worker.on("failed", (job, err) =>
+    console.error(`❌ Job ${job?.id} failed:`, err?.message || err)
+  );
 
   console.log("🚀 Worker started");
   return worker;
