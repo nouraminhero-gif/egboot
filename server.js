@@ -1,58 +1,54 @@
-console.log("REDIS_URL exists?", Boolean(process.env.REDIS_URL));
-import "dotenv/config";
 import express from "express";
+import bodyParser from "body-parser";
+
 import { enqueueIncomingMessage, startWorker } from "./queue.js";
 
 const app = express();
-app.use(express.json());
+app.use(bodyParser.json());
+
+/* =========================
+   Health Check
+========================= */
+app.get("/", (req, res) => {
+  res.status(200).json({ ok: true, service: "egboot" });
+});
+
+/* =========================
+   Webhook Example (Messenger)
+   - enqueue payload to Redis
+========================= */
+app.post("/webhook", async (req, res) => {
+  try {
+    await enqueueIncomingMessage(req.body);
+    return res.sendStatus(200);
+  } catch (e) {
+    console.error("❌ Webhook error:", e.message);
+    return res.sendStatus(500);
+  }
+});
+
+/* =========================
+   Worker Handler
+   - هنا بتحط منطق معالجة الرسائل
+========================= */
+async function handleJob(job) {
+  // مثال بسيط:
+  console.log("📩 Job received:", JSON.stringify(job).slice(0, 500));
+
+  // TODO: call your bot logic here
+  // مثال:
+  // await processIncomingMessage(job);
+}
+
+/* =========================
+   Start Worker + Server
+========================= */
+startWorker(handleJob);
 
 const PORT = process.env.PORT || 8080;
-const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 
-// Health
-app.get("/", (req, res) => res.status(200).send("✅ Egboot Messenger Bot running"));
+console.log("REDIS_PUBLIC_URL exists?", !!process.env.REDIS_PUBLIC_URL);
 
-// Webhook verify (Facebook)
-app.get("/webhook", (req, res) => {
-  const mode = req.query["hub.mode"];
-  const token = req.query["hub.verify_token"];
-  const challenge = req.query["hub.challenge"];
-
-  if (mode === "subscribe" && token === VERIFY_TOKEN) {
-    return res.status(200).send(challenge);
-  }
-  return res.sendStatus(403);
+app.listen(PORT, () => {
+  console.log(`🚀 Server running on ${PORT}`);
 });
-
-// Webhook receive (Facebook)
-app.post("/webhook", (req, res) => {
-  // ✅ الرد الفوري قبل أي معالجة
-  res.status(200).send("EVENT_RECEIVED");
-
-  const body = req.body;
-  if (body.object !== "page") return;
-
-  for (const entry of body.entry || []) {
-    for (const event of entry.messaging || []) {
-      // تجاهل echo
-      if (event?.message?.is_echo) continue;
-
-      const psid = event.sender?.id;
-      const text = event?.message?.text?.trim();
-      if (!psid || !text) continue;
-
-      const mid = event?.message?.mid || null;
-      const timestamp = event?.timestamp || Date.now();
-
-      // حط الرسالة في Queue
-      enqueueIncomingMessage({ psid, text, mid, timestamp }).catch((e) => {
-        console.error("Enqueue error:", e?.message);
-      });
-    }
-  }
-});
-
-// Start worker once
-startWorker();
-
-app.listen(PORT, () => console.log("🚀 Server running on", PORT)); 
