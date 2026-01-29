@@ -4,13 +4,15 @@ const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
 export async function askAI(userId, message) {
     try {
-        const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
-        const prompt = `أنت بياع في محل ملابس اسمه Egboot، رد بلهجة مصرية قصيرة جداً. الزبون بيقول: ${message}`;
-        const result = await model.generateContent(prompt);
+        const model = genAI.getGenerativeModel({ 
+            model: "gemini-1.5-flash",
+            systemInstruction: "أنت بياع مصري شاطر وبيهزر في براند ملابس Egboot. ردودك قصيرة، روشة، وباللهجة المصرية فقط."
+        });
+
+        const result = await model.generateContent(message);
         return result.response.text();
     } catch (error) {
-        // لو فشل، السيرفر هيكتب السبب في الـ Logs
-        console.error("Gemini Error Detail:", error.message);
-        return "منورنا في Egboot، ثواني وهرد على سعادتك بكل التفاصيل."; 
+        console.error("Gemini Error:", error.message);
+        return "منورنا في Egboot يا وحش! ثواني والشبكة تظبط وأرد عليك بكل التفاصيل.";
     }
 }
