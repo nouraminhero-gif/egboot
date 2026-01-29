@@ -202,4 +202,85 @@ export async function salesReply({ senderId, text }) {
 
       const productAr = session.order.product === "tshirt" ? "تيشيرت" : "هودي";
       return (
-        `✅ تأكيد الطلب:\n`
+        `✅ تأكيد الطلب:\n` +
+        `- المنتج: ${productAr}\n` +
+        `- المقاس: ${session.order.size}\n` +
+        `- اللون: ${session.order.color}\n\n` +
+        `اكتب "تأكيد" عشان نكمل ✍️`
+      );
+    }
+
+    // لو كتب مقاس تاني وهو في اللون
+    if (detectedSize) {
+      session.order.size = detectedSize;
+      setSession(senderId, session);
+      return "تمام ✅ المقاس اتحدث. دلوقتي اللون؟ (أسود / أبيض / كحلي)";
+    }
+
+    return "قولّي اللون من دول: أسود / أبيض / كحلي";
+  }
+
+  // تأكيد
+  if (session.step === "confirm") {
+    if (hasAny(t, ["تأكيد", "تاكيد", "confirm", "ok", "تمام"])) {
+      session.step = "phone";
+      setSession(senderId, session);
+      return "تمام ✅ ابعت رقم الموبايل 📱";
+    }
+    if (hasAny(t, ["تعديل", "غير", "change"])) {
+      session.step = "choose_product";
+      session.order.size = null;
+      session.order.color = null;
+      setSession(senderId, session);
+      return "ولا يهمك ✅ تحب **تيشيرت** ولا **هودي**؟";
+    }
+
+    return 'اكتب "تأكيد" لإرسال الطلب ✅ أو "تعديل" لو عايز تغيّر حاجة.';
+  }
+
+  // الموبايل
+  if (session.step === "phone") {
+    // استخراج رقم بسيط
+    const digits = raw.replace(/[^\d]/g, "");
+    if (digits.length >= 10) {
+      session.order.phone = digits;
+      session.step = "address";
+      setSession(senderId, session);
+      return "تمام ✅ ابعت العنوان بالتفصيل 🏠";
+    }
+    return "ابعت رقم موبايل صحيح (مثال: 01xxxxxxxxx) 📱";
+  }
+
+  // العنوان
+  if (session.step === "address") {
+    if (raw.trim().length < 8) return "العنوان قصير شوية 😅 ابعت تفاصيل أكتر (محافظة/منطقة/شارع/رقم منزل).";
+
+    session.order.address = raw.trim();
+    session.step = "done";
+    setSession(senderId, session);
+
+    const productAr = session.order.product === "tshirt" ? "تيشيرت" : "هودي";
+    const shipping = catalog?.shipping || "الشحن: 50 جنيه لكل المحافظات";
+
+    // هنا المفروض في SaaS حقيقي: تسجّل الأوردر DB / Sheet / CRM
+    // حاليا مجرد تأكيد
+    return (
+      `🎉 تم تأكيد الطلب بنجاح!\n\n` +
+      `📦 المنتج: ${productAr}\n` +
+      `📏 المقاس: ${session.order.size}\n` +
+      `🎨 اللون: ${session.order.color}\n` +
+      `📱 الموبايل: ${session.order.phone}\n` +
+      `🏠 العنوان: ${session.order.address}\n\n` +
+      `🚚 ${shipping}\n` +
+      `لو عايز تعمل طلب جديد اكتب: "ابدأ من جديد"`
+    );
+  }
+
+  // done
+  if (session.step === "done") {
+    return 'طلبك متسجل ✅ لو عايز طلب جديد اكتب: "ابدأ من جديد"';
+  }
+
+  // fallback
+  return "مش فاهم قصدك قوي 😅 تحب **تيشيرت** ولا **هودي**؟";
+}
