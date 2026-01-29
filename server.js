@@ -6,7 +6,7 @@ const app = express();
 app.use(express.json());
 
 app.post('/webhook', async (req, res) => {
-    // الرد الفوري لمنع تكرار فيسبوك
+    // الرد الفوري لإيقاف تكرار فيسبوك المزعج
     res.status(200).send('EVENT_RECEIVED');
 
     const body = req.body;
@@ -19,7 +19,7 @@ app.post('/webhook', async (req, res) => {
             const userMessage = messaging.message.text;
 
             try {
-                // استدعاء Gemini الذكي
+                // استدعاء ذكاء Gemini
                 const aiResponse = await askAI(sender_psid, userMessage);
                 
                 await axios.post(`https://graph.facebook.com/v18.0/me/messages?access_token=${process.env.PAGE_ACCESS_TOKEN}`, {
@@ -27,7 +27,7 @@ app.post('/webhook', async (req, res) => {
                     message: { text: aiResponse }
                 });
             } catch (e) {
-                console.error("خطأ في الإرسال:", e.message);
+                console.error("خطأ في إرسال الرد:", e.message);
             }
         }
     }
