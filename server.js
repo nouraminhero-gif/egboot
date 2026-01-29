@@ -1,130 +1,130 @@
-// server.js
-import express from "express";
-import bodyParser from "body-parser";
-import crypto from "crypto";
+// queue.js
+import Redis from "ioredis";
 
-import { enqueueIncomingMessage, startWorker } from "./queue.js";
+// ================== Redis Connection ==================
+const REDIS_URL =
+  process.env.REDIS_PUBLIC_URL ||
+  process.env.REDIS_URL ||
+  null;
 
-const app = express();
-const PORT = process.env.PORT || 8080;
-
-// لازم Raw Body عشان verify بتاع Meta
-app.use(
-  bodyParser.json({
-    verify: (req, res, buf) => {
-      req.rawBody = buf?.toString("utf8") || "";
-    },
-  })
-);
-
-// ====== ENV ======
-const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "";
-const PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN || "";
-const APP_SECRET = process.env.APP_SECRET || ""; // اختياري لو هتعمل signature verify
-const WEBHOOK_PATH = process.env.WEBHOOK_PATH || "/webhook";
-
-// ====== Helpers ======
-function timingSafeEquals(a, b) {
-  const ba = Buffer.from(a);
-  const bb = Buffer.from(b);
-  if (ba.length !== bb.length) return false;
-  return crypto.timingSafeEqual(ba, bb);
+if (!REDIS_URL) {
+  console.error("❌ REDIS_PUBLIC_URL not found in environment variables");
 }
 
-// تحقق اختياري لتوقيع Meta (X-Hub-Signature-256)
-function verifyMetaSignature(req) {
-  if (!APP_SECRET) return true; // لو مش حاطط APP_SECRET، بنعدّي
-  const signature = req.get("x-hub-signature-256");
-  if (!signature) return false;
+export const redis = REDIS_URL
+  ? new Redis(REDIS_URL, {
+      maxRetriesPerRequest: 1,
+      enableReadyCheck: false,
+      retryStrategy(times) {
+        if (times > 3) return null; // مهم عشان Railway ما يعملش restart loop
+        return Math.min(times * 500, 2000);
+      },
+    })
+  : null;
 
-  const expected =
-    "sha256=" +
-    crypto.createHmac("sha256", APP_SECRET).update(req.rawBody || "").digest("hex");
-
-  return timingSafeEquals(signature, expected);
-}
-
-// ====== Health ======
-app.get("/", (req, res) => {
-  res.status(200).send("✅ egboot is running");
+redis?.on("connect", () => {
+  console.log("✅ Redis connected");
 });
 
-// ====== Webhook Verify (GET) ======
-app.get(WEBHOOK_PATH, (req, res) => {
-  const mode = req.query["hub.mode"];
-  const token = req.query["hub.verify_token"];
-  const challenge = req.query["hub.challenge"];
+redis?.on("error", (err) => {
+  console.error("❌ Redis error:", err.message);
+});
 
-  if (mode === "subscribe" && token === VERIFY_TOKEN) {
-    return res.status(200).send(challenge);
+// ================== Queue Config ==================
+const QUEUE_KEY = "egboot:incoming_messages";
+let workerRunning = false;
+
+// ================== Enqueue ==================
+export async function enqueueIncomingMessage(payload) {
+  if (!redis) {
+    console.warn("⚠️ enqueue skipped: redis not available");
+    return;
   }
-  return res.sendStatus(403);
-});
 
-// ====== Webhook Receive (POST) ======
-app.post(WEBHOOK_PATH, async (req, res) => {
   try {
-    // Signature verify (اختياري)
-    if (!verifyMetaSignature(req)) {
-      return res.sendStatus(403);
-    }
+    await redis.rpush(QUEUE_KEY, JSON.stringify(payload));
+  } catch (err) {
+    console.error("❌ enqueue error:", err.message);
+  }
+}
 
-    const body = req.body;
+// ================== Worker ==================
+export async function startWorker({ pageAccessToken }) {
+  if (!redis) {
+    console.warn("⚠️ Worker not started: redis not available");
+    return;
+  }
 
-    // Meta بيبعت object = "page" في رسائل فيسبوك
-    if (body?.object !== "page") {
-      return res.sendStatus(404);
-    }
+  if (workerRunning) {
+    console.log("ℹ️ Worker already running");
+    return;
+  }
 
-    // ✅ لازم نرد بسرعة 200 عشان Meta ما تعيدش الإرسال
-    res.sendStatus(200);
+  workerRunning = true;
+  console.log("👷 Worker started");
 
-    // بعد الرد، نعالج في الخلفية (enqueue)
-    const entries = body.entry || [];
-    for (const entry of entries) {
-      const messaging = entry.messaging || [];
-      for (const event of messaging) {
-        // event ممكن يبقى message أو postback
-        await enqueueIncomingMessage({
-          entryId: entry.id,
-          time: entry.time,
-          event,
-        });
+  (async function loop() {
+    while (true) {
+      try {
+        const data = await redis.blpop(QUEUE_KEY, 5);
+        if (!data) continue;
+
+        const [, raw] = data;
+        const job = JSON.parse(raw);
+
+        await handleMessage(job, pageAccessToken);
+      } catch (err) {
+        console.error("❌ Worker error:", err.message);
+        await sleep(1000);
       }
     }
-  } catch (err) {
-    // لو حصل خطأ قبل ما نرد 200
-    try {
-      res.sendStatus(500);
-    } catch {}
-    console.error("Webhook error:", err?.message || err);
-  }
-});
+  })();
+}
 
-// ====== Start Worker + Server ======
-(async () => {
+// ================== Message Handler ==================
+async function handleMessage(job, pageAccessToken) {
+  const event = job?.event;
+  if (!event) return;
+
+  // Message
+  if (event.message?.text) {
+    const senderId = event.sender.id;
+    const text = event.message.text;
+
+    console.log("📩 Message:", senderId, text);
+
+    // هنا بعدين هنركب AI / Sales Logic
+    await sendTextMessage(senderId, "تم استلام رسالتك ✅", pageAccessToken);
+  }
+
+  // Postback
+  if (event.postback) {
+    console.log("📦 Postback:", event.postback.payload);
+  }
+}
+
+// ================== Send Message ==================
+async function sendTextMessage(psid, text, token) {
+  if (!token) return;
+
   try {
-    console.log("🔧 Starting worker...");
-    await startWorker({
-      pageAccessToken: PAGE_ACCESS_TOKEN,
-    });
-
-    app.listen(PORT, () => {
-      console.log(`🚀 Server running on ${PORT}`);
-      console.log(`🔗 Webhook path: ${WEBHOOK_PATH}`);
-      console.log(`🔐 VERIFY_TOKEN exists? ${!!VERIFY_TOKEN}`);
-      console.log(`🔑 PAGE_ACCESS_TOKEN exists? ${!!PAGE_ACCESS_TOKEN}`);
-      console.log(`🧩 APP_SECRET exists? ${!!APP_SECRET}`);
-    });
+    await fetch(
+      `https://graph.facebook.com/v18.0/me/messages?access_token=${token}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          recipient: { id: psid },
+          message: { text },
+        }),
+      }
+    );
   } catch (err) {
-    // مهم: ما تقفلش السيرفر بسبب Redis أو Worker failures
-    // خلي Railway ما يعملش Crash loop
-    console.error("⚠️ Failed to start worker:", err?.message || err);
-
-    // شغّل السيرفر حتى لو الووركر فشل (مهم لتجنب restart loops)
-    app.listen(PORT, () => {
-      console.log(`🚀 Server running on ${PORT} (worker failed to start)`);
-      console.log(`🔗 Webhook path: ${WEBHOOK_PATH}`);
-    });
+    console.error("❌ Send message error:", err.message);
   }
-})();
+}
+
+// ================== Utils ==================
+function sleep(ms) {
+  return new Promise((res) => setTimeout(res, ms));
+}
