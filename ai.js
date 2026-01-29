@@ -23,7 +23,6 @@ Keep answers short and friendly.
 If the question is not about clothes, gently redirect.
 `;
 
-// ===== main function =====
 export async function askAI(message) {
   if (!genAI) {
     return "ثواني براجع السيستم 🤍";
