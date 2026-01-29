@@ -1,4 +1,11 @@
 // server.js
+process.on("unhandledRejection", (reason) => {
+  console.error("UNHANDLED_REJECTION:", reason);
+});
+
+process.on("uncaughtException", (err) => {
+  console.error("UNCAUGHT_EXCEPTION:", err);
+});
 import express from "express";
 import { enqueueIncomingMessage, startWorker } from "./queue.js";
 
