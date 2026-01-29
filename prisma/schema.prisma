@@ -1,0 +1,131 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Tenant {
+  id            String   @id @default(cuid())
+  name          String
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  // Sales profile / policies
+  botName       String   @default("Egboot")
+  tone          String   @default("friendly_egyptian")
+  aggressiveness Int     @default(6) // 1..10
+  returnPolicy  String   @default("استبدال خلال 14 يوم بشرط الفاتورة")
+  shippingPolicy String  @default("شحن خلال 2-4 أيام عمل")
+  cashOnly      Boolean  @default(true)
+
+  users         User[]
+  pages         Page[]
+  products      Product[]
+  conversations Conversation[]
+  orders        Order[]
+}
+
+model User {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  password  String
+  role      String   @default("tenant") // "admin" | "tenant"
+  tenantId  String?
+  tenant    Tenant?  @relation(fields: [tenantId], references: [id])
+
+  createdAt DateTime @default(now())
+}
+
+model Page {
+  id        String   @id @default(cuid())
+  tenantId  String
+  tenant    Tenant   @relation(fields: [tenantId], references: [id])
+
+  pageId    String   @unique  // Facebook Page ID
+  pageName  String?
+  accessToken String // Page Access Token
+
+  createdAt DateTime @default(now())
+}
+
+model Product {
+  id        String   @id @default(cuid())
+  tenantId  String
+  tenant    Tenant   @relation(fields: [tenantId], references: [id])
+
+  name      String
+  price     Int
+  material  String?
+  colors    String[] // ["أسود","أبيض"]
+  sizes     String[] // ["S","M","L","XL"]
+  stockNote String?  // Optional note
+
+  createdAt DateTime @default(now())
+}
+
+model Conversation {
+  id        String   @id @default(cuid())
+  tenantId  String
+  tenant    Tenant   @relation(fields: [tenantId], references: [id])
+
+  pageId    String // FB Page ID (string)
+  psid      String // user PSID
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  messages  Message[]
+  session   Session?
+  orders    Order[]
+  @@unique([tenantId, pageId, psid])
+}
+
+model Message {
+  id             String   @id @default(cuid())
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id])
+
+  direction      String   // "in" | "out"
+  mid            String?  // FB message id (dedup)
+  text           String
+  timestampMs    BigInt?
+
+  createdAt      DateTime @default(now())
+}
+
+model Session {
+  id             String   @id @default(cuid())
+  conversationId String   @unique
+  conversation   Conversation @relation(fields: [conversationId], references: [id])
+
+  intent         String?  // "رجالي/حريمي" / product type
+  productId      String?
+  productName    String?
+  size           String?
+  color          String?
+  city           String?
+  address        String?
+  phone          String?
+  customerName   String?
+
+  updatedAt      DateTime @updatedAt
+  createdAt      DateTime @default(now())
+}
+
+model Order {
+  id             String   @id @default(cuid())
+  tenantId       String
+  tenant         Tenant   @relation(fields: [tenantId], references: [id])
+
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id])
+
+  status         String   @default("draft") // draft|confirmed|printed
+  sheetText      String   // جاهز للطباعة
+
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+}
