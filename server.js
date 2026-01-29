@@ -1,130 +1,72 @@
-// queue.js
-import Redis from "ioredis";
+// server.js
+import express from "express";
+import { enqueueIncomingMessage, startWorker } from "./queue.js";
 
-// ================== Redis Connection ==================
-const REDIS_URL =
-  process.env.REDIS_PUBLIC_URL ||
-  process.env.REDIS_URL ||
-  null;
+const app = express();
+app.use(express.json());
 
-if (!REDIS_URL) {
-  console.error("❌ REDIS_PUBLIC_URL not found in environment variables");
-}
+// ================== ENV ==================
+const PORT = process.env.PORT || 8080;
+const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "";
+const PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN || "";
 
-export const redis = REDIS_URL
-  ? new Redis(REDIS_URL, {
-      maxRetriesPerRequest: 1,
-      enableReadyCheck: false,
-      retryStrategy(times) {
-        if (times > 3) return null; // مهم عشان Railway ما يعملش restart loop
-        return Math.min(times * 500, 2000);
-      },
-    })
-  : null;
-
-redis?.on("connect", () => {
-  console.log("✅ Redis connected");
+// ================== Safety (prevents crash loops) ==================
+process.on("unhandledRejection", (err) => {
+  console.error("❌ unhandledRejection:", err?.message || err);
 });
 
-redis?.on("error", (err) => {
-  console.error("❌ Redis error:", err.message);
+process.on("uncaughtException", (err) => {
+  console.error("❌ uncaughtException:", err?.message || err);
 });
 
-// ================== Queue Config ==================
-const QUEUE_KEY = "egboot:incoming_messages";
-let workerRunning = false;
+// ================== Health ==================
+app.get("/", (req, res) => {
+  res.status(200).send("OK ✅");
+});
 
-// ================== Enqueue ==================
-export async function enqueueIncomingMessage(payload) {
-  if (!redis) {
-    console.warn("⚠️ enqueue skipped: redis not available");
-    return;
+// ================== Facebook Webhook Verify (GET) ==================
+app.get("/webhook", (req, res) => {
+  const mode = req.query["hub.mode"];
+  const token = req.query["hub.verify_token"];
+  const challenge = req.query["hub.challenge"];
+
+  if (mode === "subscribe" && token && token === VERIFY_TOKEN) {
+    console.log("✅ Webhook verified");
+    return res.status(200).send(challenge);
   }
 
+  console.warn("❌ Webhook verify failed");
+  return res.sendStatus(403);
+});
+
+// ================== Facebook Webhook Events (POST) ==================
+app.post("/webhook", async (req, res) => {
   try {
-    await redis.rpush(QUEUE_KEY, JSON.stringify(payload));
-  } catch (err) {
-    console.error("❌ enqueue error:", err.message);
-  }
-}
+    const body = req.body;
 
-// ================== Worker ==================
-export async function startWorker({ pageAccessToken }) {
-  if (!redis) {
-    console.warn("⚠️ Worker not started: redis not available");
-    return;
-  }
+    // لازم نرد 200 بسرعة عشان FB ما يعيدش الارسال
+    res.sendStatus(200);
 
-  if (workerRunning) {
-    console.log("ℹ️ Worker already running");
-    return;
-  }
+    if (body.object !== "page") return;
 
-  workerRunning = true;
-  console.log("👷 Worker started");
-
-  (async function loop() {
-    while (true) {
-      try {
-        const data = await redis.blpop(QUEUE_KEY, 5);
-        if (!data) continue;
-
-        const [, raw] = data;
-        const job = JSON.parse(raw);
-
-        await handleMessage(job, pageAccessToken);
-      } catch (err) {
-        console.error("❌ Worker error:", err.message);
-        await sleep(1000);
+    const entries = body.entry || [];
+    for (const entry of entries) {
+      const events = entry.messaging || [];
+      for (const event of events) {
+        // بنرمي كل event في الـ Queue
+        await enqueueIncomingMessage({ event });
       }
     }
-  })();
-}
-
-// ================== Message Handler ==================
-async function handleMessage(job, pageAccessToken) {
-  const event = job?.event;
-  if (!event) return;
-
-  // Message
-  if (event.message?.text) {
-    const senderId = event.sender.id;
-    const text = event.message.text;
-
-    console.log("📩 Message:", senderId, text);
-
-    // هنا بعدين هنركب AI / Sales Logic
-    await sendTextMessage(senderId, "تم استلام رسالتك ✅", pageAccessToken);
-  }
-
-  // Postback
-  if (event.postback) {
-    console.log("📦 Postback:", event.postback.payload);
-  }
-}
-
-// ================== Send Message ==================
-async function sendTextMessage(psid, text, token) {
-  if (!token) return;
-
-  try {
-    await fetch(
-      `https://graph.facebook.com/v18.0/me/messages?access_token=${token}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          recipient: { id: psid },
-          message: { text },
-        }),
-      }
-    );
   } catch (err) {
-    console.error("❌ Send message error:", err.message);
+    // حتى لو حصل error هنا، احنا أصلاً رجعنا 200
+    console.error("❌ webhook post error:", err?.message || err);
   }
-}
+});
 
-// ================== Utils ==================
-function sleep(ms) {
-  return new Promise((res) => setTimeout(res, ms));
-}
+// ================== Start Server ==================
+app.listen(PORT, () => {
+  console.log(`🚀 Server running on port ${PORT}`);
+
+  // شغل Worker مرة واحدة
+  startWorker({ pageAccessToken: PAGE_ACCESS_TOKEN });
+});
