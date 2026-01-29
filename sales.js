@@ -1,33 +1,50 @@
-import { sessions } from "./state.js";
-import { askAI } from "./ai.js"; // ربط ملف الذكاء الجديد
-import { saveLead } from "./lead.js";
+export function buildSalesSystemPrompt(tenant, products) {
+  const topProducts = products.slice(0, 12).map(p => {
+    return `- ${p.name} | ${p.price} جنيه | خامة: ${p.material || "—"} | ألوان: ${p.colors.join(", ")} | مقاسات: ${p.sizes.join(", ")}`;
+  }).join("\n");
 
-export async function handleSales(psid, text) {
-    let session = sessions.get(psid) || { step: "start", data: {} };
-    
-    // إرسال النص للذكاء الاصطناعي للحصول على رد ذكي وملتزم بالقواعد
-    const aiReply = await askAI(text, `Step: ${session.step}`);
+  return `
+You are "${tenant.botName}" — an elite Egyptian clothing store sales assistant.
+Goal: convert chats into CASH ON DELIVERY orders.
 
-    switch (session.step) {
-        case "start":
-            session.step = "service";
-            sessions.set(psid, session);
-            return "أهلاً بك في Egboot 🚀، كيف يمكننا مساعدتك اليوم؟";
+Tone: Egyptian Arabic slang, friendly, confident. Short replies (2–6 lines).
+Rules:
+- Ask only 1–2 questions per message.
+- Offer 2–3 options max, then recommend ONE.
+- Always move toward collecting: product, size, color, city, address, phone, name.
+- If user greets: greet + ask (رجالي ولا حريمي؟) + (بتدور على إيه؟).
+- If user asks "سعر": ask size + color + city, then quote price + shipping policy.
+- Always close: "تحب أجهزهولك أوردر؟"
 
-        case "service":
-            session.data.service = text;
-            session.step = "name";
-            sessions.set(psid, session);
-            return aiReply; // استخدام رد الـ AI لطلب الاسم بشكل ودي
+Store policies:
+- Return: ${tenant.returnPolicy}
+- Shipping: ${tenant.shippingPolicy}
+- Payment: Cash on delivery only.
 
-        case "contact":
-            session.data.contact = text;
-            session.step = "done";
-            await saveLead(session.data); // حفظ البيانات في Sheets
-            sessions.set(psid, session);
-            return "تم تسجيل طلبك بنجاح! فريقنا سيتواصل معك قريباً. هل لديك أي استفسار آخر؟";
+Catalog (current):
+${topProducts || "- (empty catalog) ask admin to add products"}
+`;
+}
 
-        default:
-            return aiReply;
-    }
+export function buildUserMessage(userText, session) {
+  // بنغذي الموديل بالـ session عشان ما يسألش نفس الأسئلة
+  return `
+Customer message: ${userText}
+
+Known info (session):
+- product: ${session.productName || "unknown"}
+- size: ${session.size || "unknown"}
+- color: ${session.color || "unknown"}
+- city: ${session.city || "unknown"}
+- address: ${session.address || "unknown"}
+- phone: ${session.phone || "unknown"}
+- name: ${session.customerName || "unknown"}
+
+Return ONLY JSON with:
+{
+  "reply": "text to send",
+  "updates": { "productName"?: "...", "size"?: "...", "color"?: "...", "city"?: "...", "address"?: "...", "phone"?: "...", "customerName"?: "..." },
+  "suggestedProductId"?: "..."
+}
+`;
 }
