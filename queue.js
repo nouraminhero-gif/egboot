@@ -1,56 +1,96 @@
+// queue.js
 import { Queue, Worker } from "bullmq";
-import IORedis from "ioredis";
 
-const redisUrl = process.env.REDIS_URL;
+const QUEUE_NAME = "incoming_messages";
 
-let connection = null;
+function assertRedisUrl() {
+  const url = process.env.REDIS_URL;
+  if (!url) {
+    console.warn("⚠️ REDIS_URL is missing. Queue/Worker will not run.");
+    return null;
+  }
+  return url;
+}
 
-// 🛑 لو مفيش Redis → نوقف Queue بالكامل
-if (!redisUrl) {
-  console.warn("⚠️ REDIS_URL not found → Queue disabled");
-} else {
-  connection = new IORedis(redisUrl, {
+/**
+ * Railway private networking + ioredis/bullmq notes:
+ * - On Railway you should use family: 0 (dual stack IPv4/IPv6)
+ * - BullMQ requires maxRetriesPerRequest to be null in many setups
+ * See Railway docs: ioredis/bullmq config.  1
+ */
+function buildBullMQConnection(redisUrl) {
+  const u = new URL(redisUrl);
+
+  // NOTE: BullMQ expects port as number
+  const port = u.port ? Number(u.port) : 6379;
+
+  return {
+    host: u.hostname,
+    port,
+    username: u.username || undefined,
+    password: u.password || undefined,
+
+    // ✅ Railway: support IPv4 + IPv6 endpoints
+    family: 0,
+
+    // ✅ BullMQ recommendation/requirement in many cases
+    // (prevents "Your redis options maxRetriesPerRequest must be null.")
     maxRetriesPerRequest: null,
-    enableReadyCheck: false,
-  });
-
-  connection.on("connect", () => {
-    console.log("✅ Redis connected");
-  });
-
-  connection.on("error", (err) => {
-    console.error("❌ Redis connection error:", err.message);
-  });
+  };
 }
 
-export const messageQueue = connection
-  ? new Queue("messages", { connection })
-  : null;
+let queueSingleton = null;
+function getQueue() {
+  if (queueSingleton) return queueSingleton;
 
-// إضافة رسالة للـ Queue
-export async function enqueueIncomingMessage(data) {
-  if (!messageQueue) {
-    console.warn("Queue disabled → message skipped");
-    return;
-  }
+  const redisUrl = assertRedisUrl();
+  if (!redisUrl) return null;
 
-  await messageQueue.add("incoming", data);
-}
-
-// تشغيل Worker
-export function startWorker(handler) {
-  if (!connection) {
-    console.warn("Worker not started (Redis disabled)");
-    return;
-  }
-
-  new Worker(
-    "messages",
-    async (job) => {
-      await handler(job.data);
+  queueSingleton = new Queue(QUEUE_NAME, {
+    connection: buildBullMQConnection(redisUrl),
+    defaultJobOptions: {
+      removeOnComplete: true,
+      removeOnFail: 50,
+      attempts: 3,
+      backoff: { type: "exponential", delay: 2000 },
     },
-    { connection }
-  );
+  });
 
-  console.log("🟢 Worker started");
+  queueSingleton.on("error", (err) => {
+    console.error("❌ Queue error:", err?.message || err);
+  });
+
+  return queueSingleton;
 }
+
+/**
+ * Enqueue an incoming message/event to be processed async by the worker.
+ * @param {object} payload - any JSON serializable object
+ */
+export async function enqueueIncomingMessage(payload) {
+  const q = getQueue();
+  if (!q) {
+    // fallback: no redis -> run sync
+    return { queued: false, reason: "REDIS_URL missing" };
+  }
+
+  await q.add("incoming_message", payload);
+  return { queued: true };
+}
+
+let workerSingleton = null;
+
+/**
+ * Starts the BullMQ worker. Safe to call multiple times.
+ * It will look for a handler function inside ./sales.js:
+ * - processIncomingMessage
+ * - handleIncomingMessage
+ * - default export function
+ */
+export function startWorker() {
+  if (workerSingleton) return workerSingleton;
+
+  const redisUrl = assertRedisUrl();
+  if (!redisUrl) return null;
+
+  workerSingleton =
