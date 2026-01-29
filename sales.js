@@ -1,231 +1,101 @@
 // sales.js
-import { getSession, saveSession, clearSession } from "./session.js";
+import { aiFallbackAnswer } from "./ai.js";
 import { catalog } from "./brain/catalog.js";
 
-// =============== Helpers ===============
-const SHIPPING_PRICE = 50;
+const sessions = new Map(); // SaaS حقيقي: خليه Redis/DB بعدين
 
-function norm(s = "") {
-  return String(s).trim().toLowerCase();
+function getSession(userId) {
+  if (!sessions.has(userId)) {
+    sessions.set(userId, {
+      step: "product", // product -> size -> color -> confirm -> phone -> address
+      cart: {},
+    });
+  }
+  return sessions.get(userId);
 }
 
-function includesAny(text, arr) {
-  return arr.some((w) => text.includes(w));
+function normalize(t) {
+  return (t || "").toString().trim().toLowerCase();
 }
 
-function pickProduct(text) {
-  const t = norm(text);
-  if (includesAny(t, ["تيشيرت", "tshirt", "t-shirt"])) return "tshirt";
-  if (includesAny(t, ["هودي", "hoodie"])) return "hoodie";
-  return null;
+function isValidSize(t) {
+  return ["m", "l", "xl"].includes(normalize(t));
 }
 
-function pickSize(text) {
-  const t = norm(text).replace(/\s+/g, "");
-  if (t.includes("xl")) return "XL";
-  if (t.includes("l")) return "L";
-  if (t.includes("m")) return "M";
-  return null;
+function isValidColor(t) {
+  const x = normalize(t);
+  return ["اسود", "أبيض", "ابيض", "كحلي", "رمادي"].includes(x);
 }
 
-function pickColor(text) {
-  const t = norm(text);
-  if (includesAny(t, ["اسود", "black"])) return "أسود";
-  if (includesAny(t, ["ابيض", "white"])) return "أبيض";
-  if (includesAny(t, ["كحلي", "navy"])) return "كحلي";
-  if (includesAny(t, ["رمادي", "gray", "grey"])) return "رمادي";
-  return null;
+function isConfirm(t) {
+  const x = normalize(t);
+  return ["تأكيد", "تاكيد", "confirm"].map(normalize).includes(x);
 }
 
-function isAskingShipping(text) {
-  const t = norm(text);
-  return includesAny(t, ["شحن", "سعر الشحن", "delivery", "shipping"]);
+function isOutOfFlow(text, session) {
+  const t = normalize(text);
+
+  if (session.step === "size" && !isValidSize(t)) return true;
+  if (session.step === "color" && !isValidColor(t)) return true;
+  if (session.step === "confirm" && !isConfirm(t)) return true;
+
+  return false;
 }
 
-function isConfirm(text) {
-  const t = norm(text);
-  return includesAny(t, ["تأكيد", "confirm", "ok", "تمام"]);
+function stepPrompt(session) {
+  if (session.step === "size") return "تمام ✅ ابعت المقاس: M / L / XL";
+  if (session.step === "color") return "تمام ✅ ابعت اللون: أسود / أبيض / كحلي";
+  if (session.step === "confirm") return "لو تحب نكمّل اكتب *تأكيد* ✅";
+  return "قولّي تحب تيشيرت ولا هودي؟";
 }
 
-function isRestart(text) {
-  const t = norm(text);
-  return includesAny(t, ["ابدأ", "start", "restart", "من الاول", "الغاء", "إلغاء"]);
-}
+export async function salesReply({ senderId, text, send }) {
+  const session = getSession(senderId);
 
-// =============== Messenger Send ===============
-async function sendTextMessage(psid, text, token) {
-  if (!token || !psid) return;
-  await fetch(`https://graph.facebook.com/v18.0/me/messages?access_token=${token}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ recipient: { id: psid }, message: { text } }),
-  });
-}
+  // ✅ لو السؤال برة الفلو → AI fallback
+  if (isOutOfFlow(text, session)) {
+    const sessionSummary = `العميل في خطوة: ${session.step}، الطلب الحالي: ${JSON.stringify(
+      session.cart
+    )}`;
 
-// =============== Main ===============
-export async function salesReply(event, pageAccessToken) {
-  const psid = event.sender?.id;
-  const tenantId = event.recipient?.id || "default";
-  if (!psid) return;
+    const ai = await aiFallbackAnswer({
+      question: text,
+      sessionSummary,
+    });
 
-  const text = event.message?.text ? String(event.message.text) : "";
-  const msg = norm(text);
-
-  // Session
-  let session = await getSession(tenantId, psid);
-
-  // Global commands
-  if (isRestart(msg)) {
-    await clearSession(tenantId, psid);
-    session = { step: "START" };
-    await sendTextMessage(psid, "تمام ✅ نبدأ من الأول… تحب *تيشيرت* ولا *هودي*؟", pageAccessToken);
+    await send(ai.answer);
+    // ✅ رجّعه لنفس الخطوة
+    await send(stepPrompt(session));
     return;
   }
 
-  // ✅ Global shipping السؤال (أهم fix)
-  // لو المستخدم سأل عن الشحن في أي وقت، نرد بسعر الشحن بدون ما نبوظ الستيب
-  if (isAskingShipping(msg)) {
-    await sendTextMessage(psid, `🚚 سعر الشحن: ${SHIPPING_PRICE} جنيه لكل المحافظات.\n\nلو تحب نكمّل، ابعت *تأكيد* ✅`, pageAccessToken);
-    // نخلي الستيب زي ما هو، أو لو كان في مرحلة متقدمة نخليها FINAL_CONFIRM
-    if (session.step && session.step !== "START") {
-      session.step = "FINAL_CONFIRM";
-      await saveSession(tenantId, psid, session);
-    }
+  // ✅ الفلو الأساسي (مختصر مثال)
+  if (session.step === "product") {
+    session.cart.product = text;
+    session.step = "size";
+    await send("تمام ✅ اختر المقاس: M / L / XL");
     return;
   }
 
-  // Router by step
-  switch (session.step || "START") {
-    case "START":
-    case "SELECT_PRODUCT": {
-      const p = pickProduct(msg);
-      if (!p) {
-        await sendTextMessage(psid, "قولّي بس ✅ تحب *تيشيرت* ولا *هودي*؟", pageAccessToken);
-        session.step = "SELECT_PRODUCT";
-        await saveSession(tenantId, psid, session);
-        return;
-      }
+  if (session.step === "size") {
+    session.cart.size = normalize(text).toUpperCase();
+    session.step = "color";
+    await send("تمام ✅ اختر اللون: أسود / أبيض / كحلي");
+    return;
+  }
 
-      session.productKey = p;
-      session.step = "SELECT_SIZE";
+  if (session.step === "color") {
+    session.cart.color = text;
+    session.step = "confirm";
+    await send(
+      `✅ تأكيد الطلب:\n- المنتج: ${session.cart.product}\n- المقاس: ${session.cart.size}\n- اللون: ${session.cart.color}\nاكتب *تأكيد* عشان نكمّل`
+    );
+    return;
+  }
 
-      const prod = catalog.categories[p];
-      await saveSession(tenantId, psid, session);
-
-      await sendTextMessage(
-        psid,
-        `تمام ✅ اختر المقاس: ${prod.sizes.join(" / ")}\nمثال: M`,
-        pageAccessToken
-      );
-      return;
-    }
-
-    case "SELECT_SIZE": {
-      const s = pickSize(msg);
-      if (!s) {
-        const prod = catalog.categories[session.productKey];
-        await sendTextMessage(psid, `مقاس إيه بالظبط؟ ✅ ${prod.sizes.join(" / ")}`, pageAccessToken);
-        return;
-      }
-      session.size = s;
-      session.step = "SELECT_COLOR";
-      await saveSession(tenantId, psid, session);
-
-      const prod = catalog.categories[session.productKey];
-      await sendTextMessage(psid, `تمام ✅ اللون؟ ${prod.colors.join(" / ")}`, pageAccessToken);
-      return;
-    }
-
-    case "SELECT_COLOR": {
-      const c = pickColor(msg);
-      if (!c) {
-        const prod = catalog.categories[session.productKey];
-        await sendTextMessage(psid, `اختار لون ✅ ${prod.colors.join(" / ")}`, pageAccessToken);
-        return;
-      }
-      session.color = c;
-      session.step = "CONFIRM_ORDER";
-      await saveSession(tenantId, psid, session);
-
-      const prod = catalog.categories[session.productKey];
-      const nameAr = session.productKey === "tshirt" ? "تيشيرت" : "هودي";
-
-      await sendTextMessage(
-        psid,
-        `✅ تأكيد الطلب:\n- المنتج: ${nameAr}\n- السعر: ${prod.price} جنيه\n- المقاس: ${session.size}\n- اللون: ${session.color}\n\nاكتب *تأكيد* عشان نكمّل ✍️`,
-        pageAccessToken
-      );
-      return;
-    }
-
-    case "CONFIRM_ORDER": {
-      if (!isConfirm(msg)) {
-        await sendTextMessage(psid, "اكتب *تأكيد* ✅ عشان نكمّل (أو اكتب *ابدأ* لو عايز من الأول)", pageAccessToken);
-        return;
-      }
-
-      session.step = "ASK_PHONE";
-      await saveSession(tenantId, psid, session);
-
-      await sendTextMessage(psid, "تمام ✅ ابعت رقم الموبايل 📱", pageAccessToken);
-      return;
-    }
-
-    case "ASK_PHONE": {
-      // رقم بسيط (مش strict قوي)
-      const phone = text.replace(/\D/g, "");
-      if (phone.length < 10) {
-        await sendTextMessage(psid, "ابعت رقم صحيح 📱 (مثال: 010xxxxxxxx)", pageAccessToken);
-        return;
-      }
-      session.phone = phone;
-      session.step = "ASK_ADDRESS";
-      await saveSession(tenantId, psid, session);
-
-      await sendTextMessage(psid, "تمام ✅ ابعت العنوان 🏠 (محافظة / مدينة / شارع)", pageAccessToken);
-      return;
-    }
-
-    case "ASK_ADDRESS": {
-      if (msg.length < 5) {
-        await sendTextMessage(psid, "العنوان محتاج تفاصيل أكتر شوية 🏠", pageAccessToken);
-        return;
-      }
-      session.address = text.trim();
-      session.step = "FINAL_CONFIRM";
-      await saveSession(tenantId, psid, session);
-
-      const nameAr = session.productKey === "tshirt" ? "تيشيرت" : "هودي";
-      const price = catalog.categories[session.productKey].price;
-      const total = price + SHIPPING_PRICE;
-
-      await sendTextMessage(
-        psid,
-        `✅ ملخص الطلب:\n- المنتج: ${nameAr}\n- المقاس: ${session.size}\n- اللون: ${session.color}\n- السعر: ${price}\n- الشحن: ${SHIPPING_PRICE}\n- الإجمالي: ${total}\n\nاكتب *تأكيد* لإرسال الطلب ✅`,
-        pageAccessToken
-      );
-      return;
-    }
-
-    case "FINAL_CONFIRM": {
-      if (!isConfirm(msg)) {
-        await sendTextMessage(psid, "اكتب *تأكيد* ✅ لإرسال الطلب أو *ابدأ* لو عايز تعدّل", pageAccessToken);
-        return;
-      }
-
-      // هنا مكان حفظ الأوردر في DB (Prisma) أو Google Sheet أو CRM
-      await sendTextMessage(psid, "تم ✅ استلام طلبك! هنتواصل معاك لتأكيد الشحن 🚚", pageAccessToken);
-
-      await clearSession(tenantId, psid);
-      return;
-    }
-
-    default: {
-      // Fallback ذكي: ما يبوظش الطلب
-      session.step = session.step || "START";
-      await saveSession(tenantId, psid, session);
-      await sendTextMessage(psid, "ممكن توضح أكتر؟ 😊 (ولو تحب تبدأ من الأول اكتب *ابدأ*)", pageAccessToken);
-      return;
-    }
+  if (session.step === "confirm") {
+    await send("تم ✅ استلمت التأكيد. ابعت رقم الموبايل 📱");
+    session.step = "phone";
+    return;
   }
 }
