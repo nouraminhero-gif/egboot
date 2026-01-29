@@ -1,63 +1,91 @@
 import { Queue, Worker } from "bullmq";
 
-/**
- * Railway provides Redis as a full URL:
- * redis://user:password@host:port
- */
 const REDIS_URL = process.env.REDIS_URL;
 
 if (!REDIS_URL) {
-  console.warn("⚠️ REDIS_URL is missing. Queue & Worker will not run.");
+  console.warn("⚠️ Missing REDIS_URL. Queue/Worker disabled.");
+}
+
+const connection = REDIS_URL || null;
+
+// Queue instance
+let messageQueue = null;
+
+// Worker instance
+let worker = null;
+
+/**
+ * Create queue (lazy init)
+ */
+function getQueue() {
+  if (!connection) return null;
+  if (!messageQueue) {
+    messageQueue = new Queue("messages", {
+      connection,
+      defaultJobOptions: {
+        removeOnComplete: true,
+        removeOnFail: false,
+      },
+    });
+  }
+  return messageQueue;
 }
 
 /**
- * Shared connection (BullMQ accepts a Redis URL directly)
+ * ✅ Exported: enqueueIncomingMessage
+ * server.js expects this name
  */
-const connection = REDIS_URL;
+export async function enqueueIncomingMessage(payload) {
+  const q = getQueue();
 
-/**
- * Main Queue
- */
-export const messageQueue = new Queue("messages", {
-  connection,
-  defaultJobOptions: {
-    removeOnComplete: true,
-    removeOnFail: false
+  // لو مفيش Redis شغال، منوقفش السيرفر
+  if (!q) {
+    console.warn("⚠️ Queue not available (no REDIS_URL). Payload skipped.");
+    return { skipped: true };
   }
-});
+
+  // jobName ثابت + payload كله
+  const job = await q.add("incoming_message", payload);
+  return { jobId: job.id };
+}
 
 /**
- * Worker
- * هنا بتحط أي logic تقيل (AI – ردود – تحليل – تخزين)
+ * ✅ Exported: startWorker
+ * server.js expects this name
  */
-export const messageWorker = new Worker(
-  "messages",
-  async (job) => {
-    const { type, payload } = job.data;
-
-    // مثال بسيط
-    if (type === "LOG") {
-      console.log("📩 Job payload:", payload);
-    }
-
-    // هنا بعدين:
-    // - AI reply
-    // - Sales logic
-    // - Save to DB
-    // - Analytics
-  },
-  {
-    connection
+export function startWorker(handler) {
+  if (!connection) {
+    console.warn("⚠️ Worker not started (no REDIS_URL).");
+    return null;
   }
-);
 
-/**
- * Worker Events (اختياري بس مفيد)
- */
-messageWorker.on("completed", (job) => {
-  console.log(`✅ Job ${job.id} completed`);
-});
+  // منع تشغيل Worker مرتين
+  if (worker) return worker;
 
-messageWorker.on("failed", (job, err) => {
-  console.error(`❌ Job ${job?.id} failed:`, err.message);
-});
+  worker = new Worker(
+    "messages",
+    async (job) => {
+      // لو server.js باعت handler هنستخدمه
+      // handler(payload) => returns response maybe
+      if (typeof handler === "function") {
+        return await handler(job.data);
+      }
+
+      // fallback لو مفيش handler
+      console.log("📩 Job received:", job.data);
+      return true;
+    },
+    { connection }
+  );
+
+  worker.on("completed", (job) => {
+    console.log(`✅ Job ${job.id} completed`);
+  });
+
+  worker.on("failed", (job, err) => {
+    console.error(`❌ Job ${job?.id} failed:`, err.message);
+  });
+
+  console.log("🚀 Worker started");
+  return worker;
+}
