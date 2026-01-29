@@ -8,18 +8,16 @@ const REDIS_URL =
   null;
 
 if (!REDIS_URL) {
-  console.error("❌ REDIS_PUBLIC_URL / REDIS_URL not found in environment variables");
+  console.error("❌ REDIS_PUBLIC_URL/REDIS_URL not found in environment variables");
 }
 
 export const redis = REDIS_URL
   ? new Redis(REDIS_URL, {
-      // خفّض retries عشان ما تعملش ضغط كبير
       maxRetriesPerRequest: 1,
       enableReadyCheck: false,
-
-      // مهم: لو Redis مش متاح، ما تدخلش في loop لا نهائي
       retryStrategy(times) {
-        if (times > 3) return null; // stop retrying
+        // لو Redis مش راضي يتصل، متعملش crash loop لا نهائي على Railway
+        if (times > 3) return null;
         return Math.min(times * 500, 2000);
       },
     })
@@ -70,50 +68,22 @@ export async function startWorker({ pageAccessToken }) {
   workerRunning = true;
   console.log("👷 Worker started");
 
-  // ✅ Loop ذكي بدل while(true):
-  // - BLPOP بtimeout طويل (مثلا 30 ثانية)
-  // - لو مفيش شغل، نعمل backoff بسيط
-  // - لو حصل error، نهدّي ثانية ونكمل
-  const BLOCK_SECONDS = 30;
-
-  async function loop() {
-    if (!workerRunning) return;
-
-    try {
-      const data = await redis.blpop(QUEUE_KEY, BLOCK_SECONDS);
-
-      // لو مفيش شغل خلال الـ timeout
-      if (!data) {
-        // backoff خفيف عشان Railway ما يشوفش tight loop
-        setTimeout(loop, 250);
-        return;
-      }
-
-      const [, raw] = data;
-      let job = null;
-
+  (async function loop() {
+    while (true) {
       try {
-        job = JSON.parse(raw);
-      } catch (e) {
-        console.error("❌ Bad job JSON:", e?.message || e);
-        // كمل على اللي بعده فورًا
-        setImmediate(loop);
-        return;
+        const data = await redis.blpop(QUEUE_KEY, 5);
+        if (!data) continue;
+
+        const [, raw] = data;
+        const job = JSON.parse(raw);
+
+        await handleMessage(job, pageAccessToken);
+      } catch (err) {
+        console.error("❌ Worker error:", err?.message || err);
+        await sleep(1000);
       }
-
-      await handleMessage(job, pageAccessToken);
-
-      // كمل فورًا
-      setImmediate(loop);
-    } catch (err) {
-      console.error("❌ Worker error:", err?.message || err);
-
-      // لو Redis اتقفل/اتقطع، ندي وقت ونحاول تاني
-      setTimeout(loop, 1000);
     }
-  }
-
-  loop();
+  })();
 }
 
 // ================== Message Handler ==================
@@ -130,22 +100,67 @@ async function handleMessage(job, pageAccessToken) {
 
     console.log("📩 Message:", senderId, text);
 
-    // هنا بعدين هنركب AI / Sales Logic
-    await sendTextMessage(senderId, "تم استلام رسالتك ✅", pageAccessToken);
+    // ✨ AI Reply (Gemini)
+    const reply = await getAIReply(text);
+
+    // Send back
+    await sendTextMessage(senderId, reply, pageAccessToken);
   }
 
   // Postback
   if (event.postback) {
-    console.log("📦 Postback:", event.postback?.payload);
+    console.log("📦 Postback:", event.postback.payload);
+  }
+}
+
+// ================== Gemini AI ==================
+async function getAIReply(userText) {
+  const key = process.env.GEMINI_API_KEY;
+  if (!key) {
+    return "GEMINI_API_KEY مش موجود على السيرفر ❌";
+  }
+
+  // Prompt بسيط للبيع (تقدر توسّعه)
+  const prompt = `
+أنت بوت مبيعات مصري اسمه Egboot.
+ردودك قصيرة وواضحة وبتقفل بيع بهدوء.
+العميل قال: "${userText}"
+رد عليه رد مناسب، وفي آخر الرد اسأل سؤال واحد بس.
+`;
+
+  try {
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=${key}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }] }],
+        }),
+      }
+    );
+
+    const data = await res.json();
+
+    const text =
+      data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+
+    return text || "ممكن توضحلي أكتر؟ 🤔";
+  } catch (err) {
+    console.error("❌ Gemini error:", err?.message || err);
+    return "حصل مشكلة بسيطة.. جرّب تاني 🙏";
   }
 }
 
 // ================== Send Message ==================
 async function sendTextMessage(psid, text, token) {
-  if (!token) return;
+  if (!token) {
+    console.warn("⚠️ PAGE_ACCESS_TOKEN missing");
+    return;
+  }
 
   try {
-    const resp = await fetch(
+    await fetch(
       `https://graph.facebook.com/v18.0/me/messages?access_token=${token}`,
       {
         method: "POST",
@@ -156,12 +171,12 @@ async function sendTextMessage(psid, text, token) {
         }),
       }
     );
-
-    if (!resp.ok) {
-      const body = await resp.text().catch(() => "");
-      console.error("❌ Send message failed:", resp.status, body);
-    }
   } catch (err) {
     console.error("❌ Send message error:", err?.message || err);
   }
+}
+
+// ================== Utils ==================
+function sleep(ms) {
+  return new Promise((res) => setTimeout(res, ms));
 }
