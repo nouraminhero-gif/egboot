@@ -2,24 +2,20 @@
 import "dotenv/config";
 import { startWorker } from "./queue.js";
 
-const PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN || "";
-
-console.log("🧠 Worker booting...");
+const PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN;
 
 if (!PAGE_ACCESS_TOKEN) {
-  console.warn("⚠️ PAGE_ACCESS_TOKEN is missing");
+  console.error("❌ PAGE_ACCESS_TOKEN missing");
+  process.exit(1);
 }
 
-// شغّل الـ worker فقط (من غير express / listen / port)
-await startWorker({ pageAccessToken: PAGE_ACCESS_TOKEN });
+console.log("👷 Worker booting...");
 
-// خليه عايش
-process.on("SIGTERM", () => {
-  console.log("🛑 SIGTERM received. Worker shutting down...");
-  process.exit(0);
+await startWorker({
+  pageAccessToken: PAGE_ACCESS_TOKEN,
 });
 
-process.on("SIGINT", () => {
-  console.log("🛑 SIGINT received. Worker shutting down...");
-  process.exit(0);
-});
+// مهم جدًا: مفيش express
+// مفيش app.listen
+// مفيش PORT
+// مفيش server
