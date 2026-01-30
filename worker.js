@@ -1,23 +1,25 @@
 // worker.js
-import express from "express";
+import "dotenv/config";
 import { startWorker } from "./queue.js";
 
-const app = express();
+const PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN || "";
 
-// لازم Railway يشوف Port شغال
-const PORT = process.env.PORT || 8080;
+console.log("🧠 Worker booting...");
 
-// Health endpoints
-app.get("/", (req, res) => res.status(200).send("WORKER OK ✅"));
-app.get("/health", (req, res) => res.status(200).json({ ok: true, worker: true }));
+if (!PAGE_ACCESS_TOKEN) {
+  console.warn("⚠️ PAGE_ACCESS_TOKEN is missing");
+}
 
-app.listen(PORT, "0.0.0.0", async () => {
-  console.log(`🧠 Worker HTTP running on port ${PORT}`);
-  try {
-    await startWorker({ pageAccessToken: process.env.PAGE_ACCESS_TOKEN || "" });
-    console.log("✅ Worker started");
-  } catch (e) {
-    console.error("❌ Worker start failed:", e?.message || e);
-    process.exit(1);
-  }
+// شغّل الـ worker فقط (من غير express / listen / port)
+await startWorker({ pageAccessToken: PAGE_ACCESS_TOKEN });
+
+// خليه عايش
+process.on("SIGTERM", () => {
+  console.log("🛑 SIGTERM received. Worker shutting down...");
+  process.exit(0);
+});
+
+process.on("SIGINT", () => {
+  console.log("🛑 SIGINT received. Worker shutting down...");
+  process.exit(0);
 });
