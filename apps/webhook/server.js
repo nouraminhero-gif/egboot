@@ -1,35 +1,24 @@
 // apps/webhook/server.js
 
-require("dotenv").config();
-const express = require("express");
+import "dotenv/config";
+import express from "express";
+
+import { fbSendText, fbTyping } from "./fb.js";
 
 const app = express();
 
-// مهم: خلي حجم البودي كويس عشان رسائل فيسبوك ممكن تبقى كبيرة
 app.use(express.json({ limit: "2mb" }));
 app.use(express.urlencoded({ extended: true }));
 
 const PORT = process.env.PORT || 8080;
 
-/**
- * ✅ Healthcheck endpoint
- * Railway هينادي عليه لو انت حاطط Healthcheck Path = /health
- */
-app.get("/health", (req, res) => {
-  res.status(200).send("OK");
-});
+// ✅ Healthcheck
+app.get("/health", (req, res) => res.status(200).send("OK"));
 
-/**
- * ✅ Root endpoint (اختياري بس مفيد للتجربة)
- */
-app.get("/", (req, res) => {
-  res.status(200).send("Egboot is running ✅");
-});
+// ✅ Root (اختياري)
+app.get("/", (req, res) => res.status(200).send("Egboot webhook running ✅"));
 
-/**
- * ✅ Facebook Messenger Webhook Verification
- * GET /webhook?hub.mode=subscribe&hub.verify_token=...&hub.challenge=...
- */
+// ✅ Verify webhook
 app.get("/webhook", (req, res) => {
   try {
     const mode = req.query["hub.mode"];
@@ -37,7 +26,6 @@ app.get("/webhook", (req, res) => {
     const challenge = req.query["hub.challenge"];
 
     if (mode === "subscribe" && token === process.env.VERIFY_TOKEN) {
-      // لازم يرجّع الـ challenge زي ما هو
       return res.status(200).send(challenge);
     }
 
@@ -48,45 +36,60 @@ app.get("/webhook", (req, res) => {
   }
 });
 
-/**
- * ✅ Receive messages
- * POST /webhook
- */
+// ✅ Receive messages
 app.post("/webhook", async (req, res) => {
-  // Facebook لازم ياخد 200 بسرعة وإلا هيعيد الإرسال
+  // Facebook لازم ياخد 200 بسرعة
   res.sendStatus(200);
 
   try {
     const body = req.body;
+    if (body.object !== "page") return;
 
-    // تأكد ده event من صفحة فيسبوك
-    if (body.object !== "page") {
-      console.log("Received non-page webhook:", body.object);
+    const token = process.env.PAGE_ACCESS_TOKEN;
+    if (!token) {
+      console.error("Missing PAGE_ACCESS_TOKEN in env vars");
       return;
     }
 
-    // هنا تقدر تبعت للـ worker أو تعالج الرسالة
-    // الأفضل: تدفع الرسالة للـ Queue (BullMQ/Redis) بدل ما تعالجها هنا
-    // عشان الـ webhook يبقى سريع وثابت
-
     const entries = body.entry || [];
+
     for (const entry of entries) {
       const messagingEvents = entry.messaging || [];
 
       for (const event of messagingEvents) {
-        // event.sender.id => PSID
-        // event.message.text => text
-        // event.postback => postback
+        const psid = event?.sender?.id;
 
-        console.log("📩 Incoming event:", JSON.stringify(event));
+        // تجاهل أي حدث بدون sender
+        if (!psid) continue;
 
-        // لو عندك function في worker/queue بتحط الشغل في Redis:
-        // مثال:
-        // await enqueueMessage(event);
+        // ✅ رسالة نصية
+        const text = event?.message?.text;
 
-        // أو لو عندك fb.js فيه handler جاهز:
-        // const { handleWebhookEvent } = require("./fb");
-        // await handleWebhookEvent(event);
+        // ✅ Postback (زرار)
+        const postbackPayload = event?.postback?.payload;
+
+        // تجاهل Echo بتاع الصفحة نفسها
+        if (event?.message?.is_echo) continue;
+
+        // لو مفيش نص ولا postback، تجاهل
+        if (!text && !postbackPayload) continue;
+
+        // typing on
+        await fbTyping(token, psid, true);
+
+        // ✅ رد تجريبي (غيره براحتك)
+        let reply = "";
+
+        if (text) {
+          reply = `وصلتني رسالتك: "${text}" ✅`;
+        } else if (postbackPayload) {
+          reply = `Postback: ${postbackPayload} ✅`;
+        }
+
+        await fbSendText(token, psid, reply);
+
+        // typing off
+        await fbTyping(token, psid, false);
       }
     }
   } catch (err) {
@@ -94,14 +97,6 @@ app.post("/webhook", async (req, res) => {
   }
 });
 
-/**
- * ✅ مهم جدًا:
- * - مفيش process.on('SIGTERM') هنا
- * - مفيش server.close()
- * - مفيش process.exit()
- * عشان Railway ساعات يبعت SIGTERM مع deploy/scale/health checks
- */
-
 app.listen(PORT, "0.0.0.0", () => {
-  console.log("🚀 Server running on port", PORT);
+  console.log("🚀 Webhook server running on port", PORT);
 });
