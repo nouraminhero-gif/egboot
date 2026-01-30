@@ -1,0 +1,19 @@
+{
+  "name": "egboot-worker",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "worker.js",
+  "scripts": {
+    "start": "node worker.js"
+  },
+  "dependencies": {
+    "@google/generative-ai": "^0.21.0",
+    "axios": "^1.7.9",
+    "bullmq": "^5.12.10",
+    "dotenv": "^16.4.5",
+    "ioredis": "^5.4.1"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
