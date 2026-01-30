@@ -1,6 +1,6 @@
 // sales.js
 // Redis Sessions via ./session.js + Gemini fallback
-// Exports: salesReply({ senderId, text, event, pageAccessToken })
+// Compatible with queue.js: salesReply(event, pageAccessToken)
 
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { catalog } from "./brain/catalog.js";
@@ -11,13 +11,56 @@ import { getSession, setSession, clearSession, createDefaultSession } from "./se
 // ENV
 // =====================
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
-let geminiModel = null;
+const GEMINI_MODEL_ENV = process.env.GEMINI_MODEL || ""; // optional override
 
-if (GEMINI_API_KEY) {
-  const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
-  geminiModel = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
-} else {
-  console.warn("⚠️ GEMINI_API_KEY is missing. AI fallback disabled.");
+let geminiModel = null;
+let geminiReady = false;
+
+// هنجرّب أسماء موديلات شائعة (لو اسم معين مش شغال)
+const GEMINI_CANDIDATES = [
+  GEMINI_MODEL_ENV,
+  "gemini-1.5-flash",
+  "gemini-1.5-flash-latest",
+  "gemini-1.5-flash-001",
+  "gemini-1.5-pro",
+  "gemini-1.5-pro-latest",
+  "gemini-1.5-pro-001",
+].filter(Boolean);
+
+// init مرة واحدة
+async function initGemini() {
+  if (geminiReady) return;
+  geminiReady = true;
+
+  if (!GEMINI_API_KEY) {
+    console.warn("⚠️ GEMINI_API_KEY is missing. AI fallback disabled.");
+    return;
+  }
+
+  try {
+    const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
+
+    for (const name of GEMINI_CANDIDATES) {
+      try {
+        const model = genAI.getGenerativeModel({ model: name });
+
+        // اختبار خفيف جدًا عشان نعرف إن الموديل شغال (ومنع 404)
+        await model.generateContent("ping");
+        geminiModel = model;
+
+        console.log(`✅ Gemini model ready: ${name}`);
+        return;
+      } catch (e) {
+        const msg = e?.message || String(e);
+        console.warn(`⚠️ Gemini model failed (${name}): ${msg}`);
+        continue;
+      }
+    }
+
+    console.warn("⚠️ No Gemini model worked. Fallback disabled.");
+  } catch (e) {
+    console.warn("⚠️ Gemini init failed:", e?.message || e);
+  }
 }
 
 // =====================
@@ -45,7 +88,14 @@ function isArabicNo(t) {
 
 function detectProduct(text) {
   const s = normalize(text);
-  if (s.includes("تيشيرت") || s.includes("تشيرت") || s.includes("تي شيرت") || s.includes("tshirt") || s.includes("t-shirt")) return "tshirt";
+  if (
+    s.includes("تيشيرت") ||
+    s.includes("تشيرت") ||
+    s.includes("تي شيرت") ||
+    s.includes("tshirt") ||
+    s.includes("t-shirt")
+  )
+    return "tshirt";
   if (s.includes("هودي") || s.includes("هودى") || s.includes("hoodie")) return "hoodie";
   if (s === "1") return "tshirt";
   if (s === "2") return "hoodie";
@@ -117,9 +167,11 @@ function faqAnswer(text) {
   const s = normalize(text);
 
   if (s.includes("شحن") || s.includes("سعر الشحن") || s.includes("shipping")) return `🚚 ${FAQ.shipping_price}`;
-  if (s.includes("يوصل") || s.includes("توصيل") || s.includes("مده") || s.includes("مدة") || s.includes("delivery")) return `⏱️ ${FAQ.delivery_time}`;
+  if (s.includes("يوصل") || s.includes("توصيل") || s.includes("مده") || s.includes("مدة") || s.includes("delivery"))
+    return `⏱️ ${FAQ.delivery_time}`;
   if (s.includes("دفع") || s.includes("payment") || s.includes("كاش")) return `💵 ${FAQ.payment}`;
-  if (s.includes("استبدال") || s.includes("استرجاع") || s.includes("exchange") || s.includes("return")) return `🔁 ${FAQ.exchange}`;
+  if (s.includes("استبدال") || s.includes("استرجاع") || s.includes("exchange") || s.includes("return"))
+    return `🔁 ${FAQ.exchange}`;
 
   return null;
 }
@@ -128,6 +180,7 @@ function faqAnswer(text) {
 // Gemini fallback
 // =====================
 async function geminiFallback({ session, userText }) {
+  await initGemini();
   if (!geminiModel) return null;
 
   const allowed = Object.keys(catalog?.categories || {});
@@ -179,8 +232,7 @@ step=${session?.step || "idle"}
   try {
     const res = await geminiModel.generateContent(prompt);
     const out = res?.response?.text?.() || "";
-    const cleaned = String(out).trim();
-    return cleaned || null;
+    return String(out).trim() || null;
   } catch (e) {
     console.error("Gemini fallback error:", e?.message || e);
     return null;
@@ -213,10 +265,25 @@ async function sendTextMessage(psid, text, token) {
 }
 
 // =====================
-// Main export
+// Main export (queue.js compatible)
 // =====================
-export async function salesReply({ senderId, text, event, pageAccessToken }) {
-  const userText = String(text || "").trim();
+export async function salesReply(event, pageAccessToken) {
+  // تجاهل echo/delivery/read
+  if (event?.message?.is_echo) return;
+  if (event?.delivery || event?.read) return;
+
+  const senderId = event?.sender?.id;
+  if (!senderId) return;
+
+  const text = event?.message?.text || "";
+  const userText = String(text).trim();
+
+  // لو مفيش نص (attachment مثلا)
+  if (!userText) {
+    await sendTextMessage(senderId, "ابعتلي رسالة نصية عشان أقدر أساعدك ✅", pageAccessToken);
+    return;
+  }
+
   const sText = normalize(userText);
 
   // session from Redis
@@ -224,7 +291,8 @@ export async function salesReply({ senderId, text, event, pageAccessToken }) {
 
   // ensure shape
   session.step = session.step || "idle";
-  session.order = session.order || { product: null, size: null, color: null, phone: null, address: null };
+  session.order =
+    session.order || { product: null, size: null, color: null, phone: null, address: null };
   session.history = Array.isArray(session.history) ? session.history : [];
 
   // save user msg
@@ -236,43 +304,47 @@ export async function salesReply({ senderId, text, event, pageAccessToken }) {
     session.history.push({ role: "bot", text: faq });
     await setSession(senderId, session);
     await sendTextMessage(senderId, faq, pageAccessToken);
-    return faq;
+    return;
   }
 
   // Global commands
-  if (["ابدأ", "start", "بداية", "بدايه"].includes(sText)) {
+  if (["ابدا", "ابدأ", "start", "بداية", "بدايه"].includes(sText)) {
     session.step = "choose_product";
     session.order = { product: null, size: null, color: null, phone: null, address: null };
+
     const msg =
       `تمام ✅ تحب تطلب إيه؟\n\n` +
       `1) تيشيرت\n` +
       `2) هودي\n\n` +
       `اكتب: تيشيرت أو هودي (أو 1/2)`;
+
     session.history.push({ role: "bot", text: msg });
     await setSession(senderId, session);
     await sendTextMessage(senderId, msg, pageAccessToken);
-    return msg;
+    return;
   }
 
   if (["الغاء", "إلغاء", "cancel"].includes(sText)) {
     await clearSession(senderId);
     const msg = `تم ✅ لغيت الطلب. لو تحب نبدأ من جديد اكتب "ابدأ"`;
     await sendTextMessage(senderId, msg, pageAccessToken);
-    return msg;
+    return;
   }
 
   // first time
   if (session.step === "idle") {
     session.step = "choose_product";
+
     const msg =
       `أهلاً بيك 👋\nتحب تطلب إيه؟\n\n` +
       `1) تيشيرت\n` +
       `2) هودي\n\n` +
       `اكتب: تيشيرت أو هودي (أو 1/2)`;
+
     session.history.push({ role: "bot", text: msg });
     await setSession(senderId, session);
     await sendTextMessage(senderId, msg, pageAccessToken);
-    return msg;
+    return;
   }
 
   // =====================
@@ -286,19 +358,21 @@ export async function salesReply({ senderId, text, event, pageAccessToken }) {
     if (!productKey || !getProductInfo(productKey)) {
       const ai = await geminiFallback({ session, userText });
       const msg = ai || `تمام ✅ قولي بس: تيشيرت ولا هودي؟ (أو 1/2)`;
+
       session.history.push({ role: "bot", text: msg });
       await setSession(senderId, session);
       await sendTextMessage(senderId, msg, pageAccessToken);
-      return msg;
+      return;
     }
 
     session.order.product = productKey;
     session.step = "choose_size";
+
     const msg = buildProductCard(productKey);
     session.history.push({ role: "bot", text: msg });
     await setSession(senderId, session);
     await sendTextMessage(senderId, msg, pageAccessToken);
-    return msg;
+    return;
   }
 
   // choose_size
@@ -308,10 +382,11 @@ export async function salesReply({ senderId, text, event, pageAccessToken }) {
     if (!size) {
       const ai = await geminiFallback({ session, userText });
       const msg = ai || `اكتب المقاس كده: M أو L أو XL ✅`;
+
       session.history.push({ role: "bot", text: msg });
       await setSession(senderId, session);
       await sendTextMessage(senderId, msg, pageAccessToken);
-      return msg;
+      return;
     }
 
     session.order.size = size;
@@ -320,10 +395,11 @@ export async function salesReply({ senderId, text, event, pageAccessToken }) {
     const prod = getProductInfo(session.order.product);
     const colors = (prod?.colors || ["أسود", "أبيض", "كحلي"]).join(" / ");
     const msg = `تمام ✅ اللون إيه؟ (${colors}) 🎨`;
+
     session.history.push({ role: "bot", text: msg });
     await setSession(senderId, session);
     await sendTextMessage(senderId, msg, pageAccessToken);
-    return msg;
+    return;
   }
 
   // choose_color
@@ -333,10 +409,11 @@ export async function salesReply({ senderId, text, event, pageAccessToken }) {
     if (!color) {
       const ai = await geminiFallback({ session, userText });
       const msg = ai || `قولي اللون من دول: أسود / أبيض / كحلي 🎨`;
+
       session.history.push({ role: "bot", text: msg });
       await setSession(senderId, session);
       await sendTextMessage(senderId, msg, pageAccessToken);
-      return msg;
+      return;
     }
 
     session.order.color = color;
@@ -346,7 +423,7 @@ export async function salesReply({ senderId, text, event, pageAccessToken }) {
     session.history.push({ role: "bot", text: msg });
     await setSession(senderId, session);
     await sendTextMessage(senderId, msg, pageAccessToken);
-    return msg;
+    return;
   }
 
   // confirm
@@ -354,28 +431,31 @@ export async function salesReply({ senderId, text, event, pageAccessToken }) {
     if (isArabicYes(userText)) {
       session.step = "get_phone";
       const msg = `تمام ✅ ابعت رقم الموبايل 📱`;
+
       session.history.push({ role: "bot", text: msg });
       await setSession(senderId, session);
       await sendTextMessage(senderId, msg, pageAccessToken);
-      return msg;
+      return;
     }
 
     if (isArabicNo(userText)) {
       session.step = "choose_product";
       session.order = { product: null, size: null, color: null, phone: null, address: null };
+
       const msg = `تمام ✅ نبدأ من الأول. تيشيرت ولا هودي؟ (أو 1/2)`;
       session.history.push({ role: "bot", text: msg });
       await setSession(senderId, session);
       await sendTextMessage(senderId, msg, pageAccessToken);
-      return msg;
+      return;
     }
 
     const ai = await geminiFallback({ session, userText });
     const msg = ai || `اكتب "تأكيد" عشان نكمل ✅ أو "إلغاء" لو عايز تعدّل`;
+
     session.history.push({ role: "bot", text: msg });
     await setSession(senderId, session);
     await sendTextMessage(senderId, msg, pageAccessToken);
-    return msg;
+    return;
   }
 
   // get_phone
@@ -383,29 +463,32 @@ export async function salesReply({ senderId, text, event, pageAccessToken }) {
     if (!looksLikePhone(userText)) {
       const ai = await geminiFallback({ session, userText });
       const msg = ai || `رقم الموبايل مش واضح 😅 ابعته بالأرقام بس (مثال: 01012345678)`;
+
       session.history.push({ role: "bot", text: msg });
       await setSession(senderId, session);
       await sendTextMessage(senderId, msg, pageAccessToken);
-      return msg;
+      return;
     }
 
     session.order.phone = userText.replace(/\s+/g, "");
     session.step = "get_address";
+
     const msg = `تمام ✅ ابعت العنوان بالتفصيل 🏠 (محافظة/مدينة/شارع/رقم عمارة)`;
     session.history.push({ role: "bot", text: msg });
     await setSession(senderId, session);
     await sendTextMessage(senderId, msg, pageAccessToken);
-    return msg;
+    return;
   }
 
   // get_address
   if (session.step === "get_address") {
     if (userText.length < 6) {
       const msg = `العنوان قصير شوية 😅 ابعته بتفصيل أكتر 🏠`;
+
       session.history.push({ role: "bot", text: msg });
       await setSession(senderId, session);
       await sendTextMessage(senderId, msg, pageAccessToken);
-      return msg;
+      return;
     }
 
     session.order.address = userText;
@@ -426,24 +509,25 @@ export async function salesReply({ senderId, text, event, pageAccessToken }) {
     session.history.push({ role: "bot", text: msg });
     await setSession(senderId, session);
     await sendTextMessage(senderId, msg, pageAccessToken);
-    return msg;
+    return;
   }
 
   // done
   if (session.step === "done") {
     const ai = await geminiFallback({ session, userText });
     const msg = ai || `طلبك متسجل ✅ لو تحب طلب جديد اكتب "ابدأ"`;
+
     session.history.push({ role: "bot", text: msg });
     await setSession(senderId, session);
     await sendTextMessage(senderId, msg, pageAccessToken);
-    return msg;
+    return;
   }
 
   // final fallback
   const ai = await geminiFallback({ session, userText });
   const msg = ai || `مش فاهمك قوي 😅 اكتب "ابدأ" عشان نبدأ الطلب.`;
+
   session.history.push({ role: "bot", text: msg });
   await setSession(senderId, session);
   await sendTextMessage(senderId, msg, pageAccessToken);
-  return msg;
 }
