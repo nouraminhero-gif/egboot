@@ -10,68 +10,79 @@ import { getSession, setSession, clearSession, createDefaultSession } from "./se
 // =====================
 // ENV
 // =====================
-const DISABLE_GEMINI = (process.env.DISABLE_GEMINI || "").toLowerCase() === "1";
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
 const GEMINI_MODEL_ENV = process.env.GEMINI_MODEL || ""; // optional override
 
 let geminiModel = null;
-let geminiInitPromise = null;
-let geminiHardDisabled = false; // لو حصل 404/403 نوقفه نهائيًا لتفادي spam logs
+let geminiReady = false;
 
+// هنجرّب أسماء موديلات شائعة (لو اسم معين مش شغال)
 const GEMINI_CANDIDATES = [
   GEMINI_MODEL_ENV,
-  // جرّب أسماء شائعة (لو ماعندكش override)
   "gemini-1.5-flash",
   "gemini-1.5-flash-latest",
+  "gemini-1.5-flash-001",
   "gemini-1.5-pro",
   "gemini-1.5-pro-latest",
+  "gemini-1.5-pro-001",
 ].filter(Boolean);
 
-// init مرة واحدة وبشكل safe
-function initGeminiOnce() {
-  if (DISABLE_GEMINI) return Promise.resolve();
-  if (geminiHardDisabled) return Promise.resolve();
-  if (geminiModel) return Promise.resolve();
-  if (geminiInitPromise) return geminiInitPromise;
+// init مرة واحدة
+async function initGemini() {
+  if (geminiReady) return;
+  geminiReady = true;
 
-  geminiInitPromise = (async () => {
-    if (!GEMINI_API_KEY) {
-      console.warn("⚠️ GEMINI_API_KEY is missing. AI fallback disabled.");
-      return;
+  if (!GEMINI_API_KEY) {
+    console.warn("⚠️ GEMINI_API_KEY is missing. AI fallback disabled.");
+    return;
+  }
+
+  try {
+    const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
+
+    for (const name of GEMINI_CANDIDATES) {
+      try {
+        const model = genAI.getGenerativeModel({ model: name });
+
+        // اختبار خفيف جدًا عشان نعرف إن الموديل شغال (ومنع 404)
+        await model.generateContent("ping");
+        geminiModel = model;
+
+        console.log(`✅ Gemini model ready: ${name}`);
+        return;
+      } catch (e) {
+        const msg = e?.message || String(e);
+        console.warn(`⚠️ Gemini model failed (${name}): ${msg}`);
+        continue;
+      }
     }
 
-    try {
-      const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
-
-      // أول موديل ينفع نستخدمه (من غير اختبار ping)
-      // الاختبار الحقيقي هيحصل داخل geminiFallback مع try/catch
-      const picked = GEMINI_CANDIDATES[0] || "gemini-1.5-flash";
-      geminiModel = genAI.getGenerativeModel({ model: picked });
-
-      console.log(`✅ Gemini init done (model set): ${picked}`);
-    } catch (e) {
-      console.warn("⚠️ Gemini init failed:", e?.message || e);
-      geminiModel = null;
-    }
-  })().finally(() => {
-    // اسمح بإعادة المحاولة لو init فشل
-    if (!geminiModel) geminiInitPromise = null;
-  });
-
-  return geminiInitPromise;
+    console.warn("⚠️ No Gemini model worked. Fallback disabled.");
+  } catch (e) {
+    console.warn("⚠️ Gemini init failed:", e?.message || e);
+  }
 }
 
 // =====================
 // Helpers
 // =====================
+
+// ✅✅✅ (تعديل #1) — هنا مكان التعديل: normalize
+// الفكرة: نشيل quotes والرموز عشان "ابدأ" وابدأ!!! وابدأ 😊 تتحول كلها لـ "ابدا"
 function normalize(text = "") {
   return String(text)
     .trim()
     .toLowerCase()
+    // شيل أي علامات اقتباس
+    .replace(/[“”"']/g, "")
+    // توحيد العربي
     .replace(/[إأآ]/g, "ا")
     .replace(/ى/g, "ي")
     .replace(/ة/g, "ه")
-    .replace(/\s+/g, " ");
+    // شيل أي رموز وترقيم (سيب حروف/أرقام/مسافات بس)
+    .replace(/[^\p{L}\p{N}\s]/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function isArabicYes(t) {
@@ -86,7 +97,14 @@ function isArabicNo(t) {
 
 function detectProduct(text) {
   const s = normalize(text);
-  if (s.includes("تيشيرت") || s.includes("تشيرت") || s.includes("تي شيرت") || s.includes("tshirt") || s.includes("t-shirt")) return "tshirt";
+  if (
+    s.includes("تيشيرت") ||
+    s.includes("تشيرت") ||
+    s.includes("تي شيرت") ||
+    s.includes("tshirt") ||
+    s.includes("t-shirt")
+  )
+    return "tshirt";
   if (s.includes("هودي") || s.includes("هودى") || s.includes("hoodie")) return "hoodie";
   if (s === "1") return "tshirt";
   if (s === "2") return "hoodie";
@@ -158,9 +176,11 @@ function faqAnswer(text) {
   const s = normalize(text);
 
   if (s.includes("شحن") || s.includes("سعر الشحن") || s.includes("shipping")) return `🚚 ${FAQ.shipping_price}`;
-  if (s.includes("يوصل") || s.includes("توصيل") || s.includes("مده") || s.includes("مدة") || s.includes("delivery")) return `⏱️ ${FAQ.delivery_time}`;
+  if (s.includes("يوصل") || s.includes("توصيل") || s.includes("مده") || s.includes("مدة") || s.includes("delivery"))
+    return `⏱️ ${FAQ.delivery_time}`;
   if (s.includes("دفع") || s.includes("payment") || s.includes("كاش")) return `💵 ${FAQ.payment}`;
-  if (s.includes("استبدال") || s.includes("استرجاع") || s.includes("exchange") || s.includes("return")) return `🔁 ${FAQ.exchange}`;
+  if (s.includes("استبدال") || s.includes("استرجاع") || s.includes("exchange") || s.includes("return"))
+    return `🔁 ${FAQ.exchange}`;
 
   return null;
 }
@@ -169,10 +189,7 @@ function faqAnswer(text) {
 // Gemini fallback
 // =====================
 async function geminiFallback({ session, userText }) {
-  if (DISABLE_GEMINI) return null;
-  if (geminiHardDisabled) return null;
-
-  await initGeminiOnce();
+  await initGemini();
   if (!geminiModel) return null;
 
   const allowed = Object.keys(catalog?.categories || {});
@@ -226,14 +243,7 @@ step=${session?.step || "idle"}
     const out = res?.response?.text?.() || "";
     return String(out).trim() || null;
   } catch (e) {
-    const msg = e?.message || String(e);
-    console.error("Gemini fallback error:", msg);
-
-    // لو 404/403: غالبًا موديل/صلاحية مش مظبوطة -> اقفله نهائيًا لتفادي spam
-    if (msg.includes("404") || msg.includes("403") || msg.toLowerCase().includes("not found")) {
-      geminiHardDisabled = true;
-      console.warn("⚠️ Gemini hard-disabled due to auth/model error. Set DISABLE_GEMINI=1 or fix GEMINI_MODEL.");
-    }
+    console.error("Gemini fallback error:", e?.message || e);
     return null;
   }
 }
@@ -305,8 +315,23 @@ export async function salesReply(event, pageAccessToken) {
     return;
   }
 
+  // ✅✅✅ (تعديل #2) — هنا مكان التعديل: سلام عليكم
+  if (sText.includes("السلام") || sText.includes("سلام عليكم")) {
+    const msg = `وعليكم السلام 😊 اكتب "ابدأ" عشان نبدأ الطلب ✅`;
+    session.history.push({ role: "bot", text: msg });
+    await setSession(senderId, session);
+    await sendTextMessage(senderId, msg, pageAccessToken);
+    return;
+  }
+
+  // ✅✅✅ (تعديل #3) — هنا مكان التعديل: شرط "ابدأ" خليته contains بدل includes
   // Global commands
-  if (["ابدا", "ابدأ", "start", "بداية", "بدايه"].includes(sText)) {
+  if (
+    sText.includes("ابدا") ||
+    sText.includes("start") ||
+    sText.includes("بداية") ||
+    sText.includes("بدايه")
+  ) {
     session.step = "choose_product";
     session.order = { product: null, size: null, color: null, phone: null, address: null };
 
@@ -528,5 +553,4 @@ export async function salesReply(event, pageAccessToken) {
   session.history.push({ role: "bot", text: msg });
   await setSession(senderId, session);
   await sendTextMessage(senderId, msg, pageAccessToken);
-  return; // مهم
-}
+             }
