@@ -1,5 +1,4 @@
 // server.js
-import "dotenv/config";
 import express from "express";
 import { enqueueIncomingMessage } from "./queue.js";
 
@@ -10,7 +9,7 @@ app.use(express.json());
 const PORT = process.env.PORT || 8080;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "";
 
-// ================== Safety (prevents crash loops) ==================
+// ================== Safety ==================
 process.on("unhandledRejection", (reason) => {
   console.error("❌ UNHANDLED_REJECTION:", reason?.message || reason);
 });
@@ -61,17 +60,8 @@ app.post("/webhook", (req, res) => {
   }
 });
 
-// ================== Graceful shutdown ==================
-function shutdown(signal) {
-  console.log(`🛑 ${signal} received. Shutting down...`);
-  process.exit(0);
-}
-process.on("SIGTERM", () => shutdown("SIGTERM"));
-process.on("SIGINT", () => shutdown("SIGINT"));
-
 // ================== Start Server ==================
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`🚀 Server running on port ${PORT}`);
-
   if (!VERIFY_TOKEN) console.warn("⚠️ VERIFY_TOKEN is missing");
 });
