@@ -2,7 +2,6 @@
 
 import "dotenv/config";
 import express from "express";
-
 import { fbSendText, fbTyping } from "./fb.js";
 
 const app = express();
@@ -12,6 +11,9 @@ app.use(express.json({ limit: "2mb" }));
 app.use(express.urlencoded({ extended: true }));
 
 const PORT = process.env.PORT || 8080;
+
+// --- simple logger ---
+const log = (...args) => console.log(new Date().toISOString(), ...args);
 
 // ✅ Healthcheck (Railway بيستخدمه)
 app.get("/health", (req, res) => res.status(200).send("OK"));
@@ -27,17 +29,20 @@ app.get("/webhook", (req, res) => {
     const challenge = req.query["hub.challenge"];
 
     if (!process.env.VERIFY_TOKEN) {
-      console.error("Missing VERIFY_TOKEN in env vars");
+      log("❌ Missing VERIFY_TOKEN in env vars");
       return res.sendStatus(500);
     }
 
-    if (mode === "subscribe" && token === process.env.VERIFY_TOKEN) {
+    // لازم challenge موجود علشان verification
+    if (mode === "subscribe" && token === process.env.VERIFY_TOKEN && challenge) {
+      log("✅ Webhook verified");
       return res.status(200).send(challenge);
     }
 
+    log("❌ Webhook verify failed");
     return res.sendStatus(403);
   } catch (err) {
-    console.error("Webhook verify error:", err);
+    log("❌ Webhook verify error:", err?.message || err);
     return res.sendStatus(500);
   }
 });
@@ -47,9 +52,9 @@ app.post("/webhook", async (req, res) => {
   // رد سريع لفيسبوك
   res.sendStatus(200);
 
-  const token = process.env.PAGE_ACCESS_TOKEN;
-  if (!token) {
-    console.error("Missing PAGE_ACCESS_TOKEN in env vars");
+  const pageToken = process.env.PAGE_ACCESS_TOKEN;
+  if (!pageToken) {
+    log("❌ Missing PAGE_ACCESS_TOKEN in env vars");
     return;
   }
 
@@ -77,47 +82,54 @@ app.post("/webhook", async (req, res) => {
         // لو مفيش حاجة مفهومة تجاهل
         if (!text && !postbackPayload) continue;
 
-        // ✅ typing on
-        await fbTyping(token, psid, true);
+        // ✅ typing on (مش مشكلة لو فشل)
+        await fbTyping(pageToken, psid, true);
 
         try {
-          // ✅ رد تجريبي
           let reply = "";
 
           if (text) {
             reply = `وصلتني رسالتك: "${text}" ✅`;
-          } else if (postbackPayload) {
+          } else {
             reply = `Postback: ${postbackPayload} ✅`;
           }
 
-          await fbSendText(token, psid, reply);
+          // لو reply فاضي لأي سبب، تجاهل
+          if (!reply) continue;
+
+          await fbSendText(pageToken, psid, reply);
+        } catch (err) {
+          log("❌ Send reply error:", err?.response?.data || err?.message || err);
         } finally {
           // ✅ typing off حتى لو حصل error
-          await fbTyping(token, psid, false);
+          await fbTyping(pageToken, psid, false);
         }
       }
     }
   } catch (err) {
-    console.error("Webhook POST error:", err?.response?.data || err?.message || err);
+    log("❌ Webhook POST error:", err?.response?.data || err?.message || err);
   }
 });
 
+// ✅ 404 لأي route غلط (اختياري)
+app.use((req, res) => res.status(404).send("Not Found"));
+
 // ✅ Start server
 const server = app.listen(PORT, "0.0.0.0", () => {
-  console.log("🚀 Webhook server running on port", PORT);
+  log("🚀 Webhook server running on port", PORT);
 });
 
 // ✅ مهم جدًا على Railway: التعامل مع SIGTERM (بيحصل عند redeploy)
 function shutdown(signal) {
-  console.log(`🛑 Received ${signal}. Shutting down gracefully...`);
+  log(`🛑 Received ${signal}. Shutting down gracefully...`);
   server.close(() => {
-    console.log("✅ Server closed.");
+    log("✅ Server closed.");
     process.exit(0);
   });
 
   // لو قفل اتأخر قوي
   setTimeout(() => {
-    console.log("⏳ Force exiting...");
+    log("⏳ Force exiting...");
     process.exit(1);
   }, 10000).unref();
 }
