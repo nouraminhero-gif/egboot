@@ -11,13 +11,17 @@ if (!REDIS_URL) {
 
 export const redis = REDIS_URL
   ? new Redis(REDIS_URL, {
-      // Railway/Upstash compatible defaults
+      // مهم جدًا للـ blocking commands زي BLPOP
       enableReadyCheck: false,
-      maxRetriesPerRequest: 1,
+      maxRetriesPerRequest: null, // ✅ لازم null عشان BLPOP ما يضربش
+
+      // خليه يتصل لما نحتاجه (مفيد في web service)
+      lazyConnect: true,
+      connectTimeout: 10000,
 
       retryStrategy(times) {
         // stop retry after some attempts to avoid hanging forever
-        if (times > 10) return null;
+        if (times > 20) return null;
         return Math.min(times * 500, 5000);
       },
     })
@@ -31,22 +35,69 @@ redis?.on("close", () => console.warn("⚠️ Redis connection closed"));
 // ================== Queue ==================
 const QUEUE_KEY = "egboot:incoming_messages";
 let workerRunning = false;
+let stopRequested = false;
+let signalsHooked = false;
+
+function hookSignalsOnce() {
+  if (signalsHooked) return;
+  signalsHooked = true;
+
+  const shutdown = async (sig) => {
+    console.log(`🛑 ${sig} received. Stopping worker...`);
+    stopRequested = true;
+
+    // فك الـ BLPOP لو كان واقف (اختياري)
+    try {
+      // ping غالبًا بيفك تعليق الشبكة
+      await redis?.ping?.();
+    } catch {}
+
+    // اقفل redis
+    try {
+      await redis?.quit?.();
+    } catch {
+      try {
+        redis?.disconnect?.();
+      } catch {}
+    }
+  };
+
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
+  process.on("SIGINT", () => shutdown("SIGINT"));
+}
+
+async function ensureRedis() {
+  if (!redis) return null;
+  try {
+    if (redis.status === "wait") {
+      await redis.connect();
+    }
+    return redis;
+  } catch (e) {
+    console.error("❌ Redis connect failed:", e?.message || e);
+    return null;
+  }
+}
 
 export async function enqueueIncomingMessage(payload) {
-  if (!redis) {
+  const r = await ensureRedis();
+  if (!r) {
     console.warn("⚠️ enqueue skipped: redis not available");
     return;
   }
 
   try {
-    await redis.rpush(QUEUE_KEY, JSON.stringify(payload));
+    await r.rpush(QUEUE_KEY, JSON.stringify(payload));
   } catch (err) {
     console.error("❌ enqueue error:", err?.message || err);
   }
 }
 
 export async function startWorker({ pageAccessToken }) {
-  if (!redis) {
+  hookSignalsOnce();
+
+  const r = await ensureRedis();
+  if (!r) {
     console.warn("⚠️ Worker not started: redis not available");
     return;
   }
@@ -56,21 +107,29 @@ export async function startWorker({ pageAccessToken }) {
   }
 
   workerRunning = true;
+  stopRequested = false;
+
   console.log("👷 Worker started");
 
   // Run loop in background (no await) لكن بأمان
   loop(pageAccessToken).catch((err) => {
-    // المفروض ده نادر جدًا لأن كل حاجة جوه loop متغلفة try/catch
     console.error("❌ Worker fatal loop error:", err?.message || err);
     workerRunning = false;
   });
 }
 
 async function loop(pageAccessToken) {
-  while (true) {
+  while (!stopRequested) {
     try {
+      const r = await ensureRedis();
+      if (!r) {
+        await sleep(1500);
+        continue;
+      }
+
       // BLPOP: returns [key, value] or null on timeout
-      const data = await redis.blpop(QUEUE_KEY, 10);
+      const data = await r.blpop(QUEUE_KEY, 10);
+      if (stopRequested) break;
       if (!data) continue;
 
       const [, raw] = data;
@@ -78,17 +137,21 @@ async function loop(pageAccessToken) {
       let job;
       try {
         job = JSON.parse(raw);
-      } catch (e) {
+      } catch {
         console.error("❌ Bad job JSON, skipping");
         continue;
       }
 
       await handleJob(job, pageAccessToken);
     } catch (err) {
+      if (stopRequested) break;
       console.error("❌ Worker error:", err?.message || err);
       await sleep(1000);
     }
   }
+
+  workerRunning = false;
+  console.log("✅ Worker stopped");
 }
 
 async function handleJob(job, pageAccessToken) {
@@ -103,12 +166,9 @@ async function handleJob(job, pageAccessToken) {
   const senderId = event.sender?.id;
   if (!senderId) return;
 
-  // only handle text messages (لو عندك attachments عايز تتعامل معاها بعدين)
+  // only handle text messages
   const text = event.message?.text?.trim() || "";
-  if (!text) {
-    // ممكن تعمل رد: "ابعت رسالة نصية" لو حابب
-    return;
-  }
+  if (!text) return;
 
   try {
     // ✅ Compatibility: بعض النسخ كانت بتاخد (event, token)
@@ -118,11 +178,7 @@ async function handleJob(job, pageAccessToken) {
     console.error("❌ salesReply crashed:", err?.message || err);
 
     // fallback safe reply
-    await sendTextMessage(
-      senderId,
-      "حصل خطأ بسيط 😅 جرّب تاني كمان شوية",
-      pageAccessToken
-    );
+    await sendTextMessage(senderId, "حصل خطأ بسيط 😅 جرّب تاني كمان شوية", pageAccessToken);
   }
 }
 
@@ -135,7 +191,6 @@ async function callSalesReply(payload) {
     try {
       return await salesReply(payload.event, payload.pageAccessToken);
     } catch (e2) {
-      // throw original for logs clarity
       throw e2 || e1;
     }
   }
@@ -145,17 +200,14 @@ async function sendTextMessage(psid, text, token) {
   if (!token || !psid) return;
 
   try {
-    const res = await fetch(
-      `https://graph.facebook.com/v18.0/me/messages?access_token=${token}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          recipient: { id: psid },
-          message: { text },
-        }),
-      }
-    );
+    const res = await fetch(`https://graph.facebook.com/v18.0/me/messages?access_token=${token}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        recipient: { id: psid },
+        message: { text },
+      }),
+    });
 
     if (!res.ok) {
       const body = await res.text().catch(() => "");
