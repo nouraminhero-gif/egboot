@@ -3,12 +3,14 @@ import express from "express";
 import { enqueueIncomingMessage, startWorker } from "./queue.js";
 
 const app = express();
-app.use(express.json());
 
 // ================== ENV ==================
-const PORT = process.env.PORT || 8080;
+const PORT = Number(process.env.PORT) || 8080;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "";
 const PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN || "";
+
+// ================== Middleware ==================
+app.use(express.json({ limit: "1mb" }));
 
 // ================== Safety (prevents crash loops) ==================
 process.on("unhandledRejection", (reason) => {
@@ -51,6 +53,7 @@ app.post("/webhook", (req, res) => {
     for (const entry of entries) {
       const events = entry.messaging || [];
       for (const event of events) {
+        // ✅ مهم: بدون await عشان ما نبطّأش
         enqueueIncomingMessage({ event }).catch((err) => {
           console.error("❌ enqueue failed:", err?.message || err);
         });
@@ -64,7 +67,7 @@ app.post("/webhook", (req, res) => {
 // ================== Worker Safe Start ==================
 let workerStarted = false;
 
-async function safeStartWorker() {
+function safeStartWorker() {
   if (workerStarted) return;
   workerStarted = true;
 
@@ -88,9 +91,10 @@ async function safeStartWorker() {
 // ================== Graceful shutdown ==================
 function shutdown(signal) {
   console.log(`🛑 ${signal} received. Shutting down...`);
-  // لو عندك close للـ redis أو حاجة في queue.js ابعتها هنا
+  // لو عندك close للـ redis أو حاجة في queue.js اعملها هنا
   process.exit(0);
 }
+
 process.on("SIGTERM", () => shutdown("SIGTERM"));
 process.on("SIGINT", () => shutdown("SIGINT"));
 
@@ -98,6 +102,7 @@ process.on("SIGINT", () => shutdown("SIGINT"));
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`🚀 Server running on port ${PORT}`);
 
+  // Log missing env (مهم للتشخيص)
   if (!VERIFY_TOKEN) console.warn("⚠️ VERIFY_TOKEN is missing");
   if (!PAGE_ACCESS_TOKEN) console.warn("⚠️ PAGE_ACCESS_TOKEN is missing");
 
