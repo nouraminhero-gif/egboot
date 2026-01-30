@@ -13,13 +13,20 @@ if (!REDIS_URL) {
 const redis = REDIS_URL
   ? new Redis(REDIS_URL, {
       enableReadyCheck: false,
-      maxRetriesPerRequest: 1,
+      // ✅ الأفضل مع BullMQ و Redis managed
+      maxRetriesPerRequest: null,
       retryStrategy(times) {
         if (times > 10) return null;
         return Math.min(times * 500, 5000);
       },
     })
   : null;
+
+// ✅ Logs مفيدة (اختياري)
+redis?.on("connect", () => console.log("🔌 Redis connected (session)"));
+redis?.on("ready", () => console.log("✅ Redis ready (session)"));
+redis?.on("error", (e) => console.error("❌ Redis error (session):", e?.message || e));
+redis?.on("close", () => console.warn("⚠️ Redis closed (session)"));
 
 const KEY_PREFIX = "egboot:session:";
 
@@ -61,7 +68,7 @@ export async function setSession(psid, session) {
   }
 
   try {
-    // TTL = 24h (غيّره براحتك)
+    // TTL = 24h
     await redis.set(KEY_PREFIX + psid, JSON.stringify(s), "EX", 60 * 60 * 24);
   } catch (e) {
     console.error("❌ setSession error:", e?.message || e);
