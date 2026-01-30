@@ -1,11 +1,18 @@
-// sales.js
+// apps/worker/sales.js
 // Redis Sessions via ./session.js + Gemini fallback
-// Compatible with queue.js: salesReply(event, pageAccessToken)
+// Compatible with:
+// 1) salesReply(event, pageAccessToken)
+// 2) salesReply({ senderId, text, event, pageAccessToken, postbackPayload })
 
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { catalog } from "./brain/catalog.js";
 import { FAQ } from "./brain/faq.js";
-import { getSession, setSession, clearSession, createDefaultSession } from "./session.js";
+import {
+  getSession,
+  setSession,
+  clearSession,
+  createDefaultSession,
+} from "./session.js";
 
 // =====================
 // ENV
@@ -44,7 +51,7 @@ async function initGemini() {
       try {
         const model = genAI.getGenerativeModel({ model: name });
 
-        // اختبار خفيف جدًا عشان نعرف إن الموديل شغال (ومنع 404)
+        // اختبار خفيف جدًا
         await model.generateContent("ping");
         geminiModel = model;
 
@@ -67,19 +74,15 @@ async function initGemini() {
 // Helpers
 // =====================
 
-// ✅✅✅ (تعديل #1) — هنا مكان التعديل: normalize
-// الفكرة: نشيل quotes والرموز عشان "ابدأ" وابدأ!!! وابدأ 😊 تتحول كلها لـ "ابدا"
+// normalize: نشيل quotes والرموز عشان "ابدأ" وابدأ!!! وابدأ 😊 تبقى "ابدا"
 function normalize(text = "") {
   return String(text)
     .trim()
     .toLowerCase()
-    // شيل أي علامات اقتباس
     .replace(/[“”"']/g, "")
-    // توحيد العربي
     .replace(/[إأآ]/g, "ا")
     .replace(/ى/g, "ي")
     .replace(/ة/g, "ه")
-    // شيل أي رموز وترقيم (سيب حروف/أرقام/مسافات بس)
     .replace(/[^\p{L}\p{N}\s]/gu, " ")
     .replace(/\s+/g, " ")
     .trim();
@@ -87,12 +90,12 @@ function normalize(text = "") {
 
 function isArabicYes(t) {
   const s = normalize(t);
-  return ["تاكيد", "تأكيد", "confirm", "ok", "تمام", "موافق", "yes", "y"].includes(s);
+  return ["تاكيد", "confirm", "ok", "تمام", "موافق", "yes", "y"].includes(s);
 }
 
 function isArabicNo(t) {
   const s = normalize(t);
-  return ["لا", "لأ", "no", "n", "مش", "مش عايز", "الغاء", "إلغاء", "cancel"].includes(s);
+  return ["لا", "لأ", "no", "n", "مش", "مش عايز", "الغاء", "cancel"].includes(s);
 }
 
 function detectProduct(text) {
@@ -121,9 +124,9 @@ function detectSize(text) {
 
 function detectColor(text) {
   const s = normalize(text);
-  if (s.includes("اسود") || s.includes("أسود") || s.includes("black")) return "أسود";
-  if (s.includes("ابيض") || s.includes("أبيض") || s.includes("white")) return "أبيض";
-  if (s.includes("كحلي") || s.includes("كحلى") || s.includes("navy")) return "كحلي";
+  if (s.includes("اسود") || s.includes("black")) return "أسود";
+  if (s.includes("ابيض") || s.includes("white")) return "أبيض";
+  if (s.includes("كحلي") || s.includes("navy")) return "كحلي";
   return null;
 }
 
@@ -175,11 +178,27 @@ function buildConfirmMessage(order) {
 function faqAnswer(text) {
   const s = normalize(text);
 
-  if (s.includes("شحن") || s.includes("سعر الشحن") || s.includes("shipping")) return `🚚 ${FAQ.shipping_price}`;
-  if (s.includes("يوصل") || s.includes("توصيل") || s.includes("مده") || s.includes("مدة") || s.includes("delivery"))
+  if (s.includes("شحن") || s.includes("سعر الشحن") || s.includes("shipping"))
+    return `🚚 ${FAQ.shipping_price}`;
+
+  if (
+    s.includes("يوصل") ||
+    s.includes("توصيل") ||
+    s.includes("مده") ||
+    s.includes("مدة") ||
+    s.includes("delivery")
+  )
     return `⏱️ ${FAQ.delivery_time}`;
-  if (s.includes("دفع") || s.includes("payment") || s.includes("كاش")) return `💵 ${FAQ.payment}`;
-  if (s.includes("استبدال") || s.includes("استرجاع") || s.includes("exchange") || s.includes("return"))
+
+  if (s.includes("دفع") || s.includes("payment") || s.includes("كاش"))
+    return `💵 ${FAQ.payment}`;
+
+  if (
+    s.includes("استبدال") ||
+    s.includes("استرجاع") ||
+    s.includes("exchange") ||
+    s.includes("return")
+  )
     return `🔁 ${FAQ.exchange}`;
 
   return null;
@@ -199,7 +218,9 @@ async function geminiFallback({ session, userText }) {
     .map((k) => {
       const p = getProductInfo(k);
       if (!p) return "";
-      return `${prettyProductName(k)}: السعر ${p.price} - مقاسات ${(p.sizes || []).join("/")} - ألوان ${(p.colors || []).join("/")}`;
+      return `${prettyProductName(k)}: السعر ${p.price} - مقاسات ${(p.sizes || []).join(
+        "/"
+      )} - ألوان ${(p.colors || []).join("/")}`;
     })
     .filter(Boolean)
     .join("\n");
@@ -255,14 +276,18 @@ async function sendTextMessage(psid, text, token) {
   if (!psid || !token) return;
 
   try {
-    const res = await fetch(`https://graph.facebook.com/v18.0/me/messages?access_token=${token}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        recipient: { id: psid },
-        message: { text },
-      }),
-    });
+    const res = await fetch(
+      `https://graph.facebook.com/v19.0/me/messages?access_token=${token}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          recipient: { id: psid },
+          messaging_type: "RESPONSE",
+          message: { text },
+        }),
+      }
+    );
 
     if (!res.ok) {
       const body = await res.text().catch(() => "");
@@ -274,40 +299,62 @@ async function sendTextMessage(psid, text, token) {
 }
 
 // =====================
-// Main export (queue.js compatible)
+// Main export
 // =====================
-export async function salesReply(event, pageAccessToken) {
+export async function salesReply(arg1, arg2) {
+  // ✅ Support both call styles
+  // Style A: salesReply(event, token)
+  // Style B: salesReply({ senderId, text, event, pageAccessToken, postbackPayload })
+  let event = null;
+  let pageAccessToken = null;
+  let directText = "";
+  let directSenderId = null;
+  let postbackPayload = null;
+
+  if (arg1 && typeof arg1 === "object" && (arg1.event || arg1.senderId || arg1.text)) {
+    event = arg1.event || null;
+    pageAccessToken = arg1.pageAccessToken || process.env.PAGE_ACCESS_TOKEN || null;
+    directText = arg1.text || "";
+    directSenderId = arg1.senderId || null;
+    postbackPayload = arg1.postbackPayload || null;
+  } else {
+    event = arg1 || null;
+    pageAccessToken = arg2 || process.env.PAGE_ACCESS_TOKEN || null;
+  }
+
   // تجاهل echo/delivery/read
   if (event?.message?.is_echo) return;
   if (event?.delivery || event?.read) return;
 
-  const senderId = event?.sender?.id;
+  const senderId = directSenderId || event?.sender?.id;
   if (!senderId) return;
 
-  const text = event?.message?.text || "";
+  const text = directText || event?.message?.text || "";
   const userText = String(text).trim();
 
-  // لو مفيش نص (attachment مثلا)
-  if (!userText) {
+  // لو مفيش نص (attachment مثلا) ومفيش postback
+  if (!userText && !postbackPayload && !event?.postback?.payload) {
     await sendTextMessage(senderId, "ابعتلي رسالة نصية عشان أقدر أساعدك ✅", pageAccessToken);
     return;
   }
 
-  const sText = normalize(userText);
+  const payload = postbackPayload || event?.postback?.payload || null;
+  const sText = normalize(userText || payload || "");
 
   // session from Redis
   let session = (await getSession(senderId)) || createDefaultSession();
 
   // ensure shape
   session.step = session.step || "idle";
-  session.order = session.order || { product: null, size: null, color: null, phone: null, address: null };
+  session.order =
+    session.order || { product: null, size: null, color: null, phone: null, address: null };
   session.history = Array.isArray(session.history) ? session.history : [];
 
-  // save user msg
-  session.history.push({ role: "user", text: userText });
+  // save user msg (لو في postback بس، نسجله برضه)
+  session.history.push({ role: "user", text: userText || `POSTBACK:${payload}` });
 
   // FAQ anytime
-  const faq = faqAnswer(userText);
+  const faq = userText ? faqAnswer(userText) : null;
   if (faq) {
     session.history.push({ role: "bot", text: faq });
     await setSession(senderId, session);
@@ -315,7 +362,7 @@ export async function salesReply(event, pageAccessToken) {
     return;
   }
 
-  // ✅✅✅ (تعديل #2) — هنا مكان التعديل: سلام عليكم
+  // سلام عليكم
   if (sText.includes("السلام") || sText.includes("سلام عليكم")) {
     const msg = `وعليكم السلام 😊 اكتب "ابدأ" عشان نبدأ الطلب ✅`;
     session.history.push({ role: "bot", text: msg });
@@ -324,14 +371,8 @@ export async function salesReply(event, pageAccessToken) {
     return;
   }
 
-  // ✅✅✅ (تعديل #3) — هنا مكان التعديل: شرط "ابدأ" خليته contains بدل includes
   // Global commands
-  if (
-    sText.includes("ابدا") ||
-    sText.includes("start") ||
-    sText.includes("بداية") ||
-    sText.includes("بدايه")
-  ) {
+  if (sText.includes("ابدا") || sText.includes("start") || sText.includes("بدايه")) {
     session.step = "choose_product";
     session.order = { product: null, size: null, color: null, phone: null, address: null };
 
@@ -347,7 +388,7 @@ export async function salesReply(event, pageAccessToken) {
     return;
   }
 
-  if (["الغاء", "إلغاء", "cancel"].includes(sText)) {
+  if (["الغاء", "cancel"].includes(sText)) {
     await clearSession(senderId);
     const msg = `تم ✅ لغيت الطلب. لو تحب نبدأ من جديد اكتب "ابدأ"`;
     await sendTextMessage(senderId, msg, pageAccessToken);
@@ -376,10 +417,10 @@ export async function salesReply(event, pageAccessToken) {
 
   // choose_product
   if (session.step === "choose_product") {
-    const productKey = detectProduct(userText);
+    const productKey = detectProduct(userText || payload || "");
 
     if (!productKey || !getProductInfo(productKey)) {
-      const ai = await geminiFallback({ session, userText });
+      const ai = await geminiFallback({ session, userText: userText || String(payload || "") });
       const msg = ai || `تمام ✅ قولي بس: تيشيرت ولا هودي؟ (أو 1/2)`;
 
       session.history.push({ role: "bot", text: msg });
@@ -553,4 +594,4 @@ export async function salesReply(event, pageAccessToken) {
   session.history.push({ role: "bot", text: msg });
   await setSession(senderId, session);
   await sendTextMessage(senderId, msg, pageAccessToken);
-             }
+}
