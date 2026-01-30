@@ -1,29 +1,23 @@
 // worker.js
-import "dotenv/config";
+import express from "express";
 import { startWorker } from "./queue.js";
 
-const PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN || "";
+const app = express();
 
-process.on("unhandledRejection", (reason) => {
-  console.error("❌ UNHANDLED_REJECTION:", reason?.message || reason);
-});
-process.on("uncaughtException", (err) => {
-  console.error("❌ UNCAUGHT_EXCEPTION:", err?.message || err);
-});
+// لازم Railway يشوف Port شغال
+const PORT = process.env.PORT || 8080;
 
-async function main() {
-  if (!PAGE_ACCESS_TOKEN) {
-    console.warn("⚠️ PAGE_ACCESS_TOKEN is missing (worker will still run but can't reply).");
+// Health endpoints
+app.get("/", (req, res) => res.status(200).send("WORKER OK ✅"));
+app.get("/health", (req, res) => res.status(200).json({ ok: true, worker: true }));
+
+app.listen(PORT, "0.0.0.0", async () => {
+  console.log(`🧠 Worker HTTP running on port ${PORT}`);
+  try {
+    await startWorker({ pageAccessToken: process.env.PAGE_ACCESS_TOKEN || "" });
+    console.log("✅ Worker started");
+  } catch (e) {
+    console.error("❌ Worker start failed:", e?.message || e);
+    process.exit(1);
   }
-
-  console.log("🧠 Worker booting...");
-  await startWorker({ pageAccessToken: PAGE_ACCESS_TOKEN });
-
-  // مهم: ما تعملش exit — سيبه شغال
-  console.log("✅ Worker is running");
-}
-
-main().catch((e) => {
-  console.error("❌ Worker failed to start:", e?.message || e);
-  process.exit(1);
 });
