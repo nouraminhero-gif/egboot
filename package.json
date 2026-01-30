@@ -5,6 +5,7 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
+    "worker": "node worker.js",
     "dev": "node --watch server.js"
   },
   "dependencies": {
