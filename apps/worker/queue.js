@@ -1,75 +1,60 @@
-// apps/webhook/queue.js
-import "dotenv/config";
-import { Queue } from "bullmq";
+// apps/worker/queue.js
+import dotenv from "dotenv";
 import IORedis from "ioredis";
+import { Queue } from "bullmq";
 
+dotenv.config();
+
+// ================== Redis Connection ==================
 const REDIS_URL = process.env.REDIS_URL || process.env.REDIS_PUBLIC_URL || "";
 
 if (!REDIS_URL) {
-  console.warn("⚠️ REDIS_URL is missing. Webhook will NOT enqueue jobs.");
+  console.error("❌ REDIS_URL is missing. Queue will not work.");
+  process.exit(1);
 }
 
-// Railway/Upstash friendly Redis connection
-export const connection = REDIS_URL
-  ? new IORedis(REDIS_URL, {
-      maxRetriesPerRequest: null,
-      enableReadyCheck: false,
-      retryStrategy(times) {
-        return Math.min(times * 200, 3000);
-      },
-    })
-  : null;
+export const connection = new IORedis(REDIS_URL, {
+  maxRetriesPerRequest: null,
+  enableReadyCheck: false,
+  retryStrategy: (times) => Math.min(times * 200, 3000),
+});
 
-connection?.on("connect", () => console.log("🔌 Redis connected (webhook)"));
-connection?.on("ready", () => console.log("✅ Redis ready (webhook)"));
-connection?.on("error", (e) => console.error("❌ Redis error (webhook):", e?.message || e));
-connection?.on("close", () => console.warn("⚠️ Redis closed (webhook)"));
+connection.on("connect", () => console.log("✅ Redis connected"));
+connection.on("ready", () => console.log("✅ Redis ready"));
+connection.on("error", (err) => console.error("❌ Redis error:", err?.message || err));
+connection.on("close", () => console.warn("⚠️ Redis connection closed"));
 
-// BullMQ Queue
-export const messagesQueue = connection
-  ? new Queue("messages", {
-      connection,
-      defaultJobOptions: {
+// ================== BullMQ Queue ==================
+// لازم يطابق الاسم اللي في worker.js
+export const messagesQueue = new Queue("messages", { connection });
+
+// ✅ Enqueue
+export async function enqueueIncomingMessage(payload) {
+  try {
+    // اسم الـ job اختياري، بس مفيد في اللوجز
+    await messagesQueue.add(
+      "incoming_message",
+      payload,
+      {
+        removeOnComplete: 200,
+        removeOnFail: 200,
         attempts: 3,
         backoff: { type: "exponential", delay: 1000 },
-        removeOnComplete: { count: 5000 },
-        removeOnFail: { count: 2000 },
-      },
-    })
-  : null;
-
-/**
- * Enqueue Messenger event (job)
- * job.data = { event, createdAt }
- */
-export async function enqueueMessage(event) {
-  if (!messagesQueue) {
-    console.warn("⚠️ enqueue skipped: queue not available");
-    return;
+      }
+    );
+  } catch (err) {
+    console.error("❌ enqueue error:", err?.message || err);
   }
-
-  await messagesQueue.add(
-    "incoming_message",
-    { event, createdAt: Date.now() },
-    {
-      // priority/timing ممكن تضيفه بعدين
-    }
-  );
 }
 
-export async function closeQueueAndRedis() {
+// ✅ Close cleanly (اختياري لو محتاج)
+export async function closeQueue() {
   try {
-    if (messagesQueue) await messagesQueue.close();
-  } catch (e) {
-    console.warn("⚠️ queue close failed:", e?.message || e);
-  }
-
+    await messagesQueue.close();
+  } catch {}
   try {
-    if (connection) await connection.quit();
-  } catch (e) {
-    console.warn("⚠️ redis quit failed:", e?.message || e);
-    try {
-      connection?.disconnect();
-    } catch {}
+    await connection.quit();
+  } catch {
+    connection.disconnect();
   }
 }
