@@ -1,21 +1,13 @@
 {
-  "name": "egboot-messenger-bot",
+  "name": "egboot-webhook",
   "version": "1.0.0",
   "type": "module",
-  "main": "server.js",
+  "private": true,
   "scripts": {
-    "start": "node server.js",
-    "worker": "node worker.js"
+    "start": "node server.js"
   },
   "dependencies": {
-    "@google/generative-ai": "^0.21.0",
-    "axios": "^1.7.9",
-    "bullmq": "^5.12.10",
-    "dotenv": "^16.4.5",
     "express": "^4.19.2",
-    "ioredis": "^5.4.1"
-  },
-  "engines": {
-    "node": ">=22"
+    "dotenv": "^16.4.5"
   }
 }
