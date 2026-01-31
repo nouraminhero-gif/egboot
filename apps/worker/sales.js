@@ -3,7 +3,6 @@ import dotenv from "dotenv";
 import axios from "axios";
 import crypto from "crypto";
 import { GoogleGenerativeAI } from "@google/generative-ai";
-
 import { getSession as _getSession, setSession as _setSession, createDefaultSession } from "./session.js";
 
 dotenv.config();
@@ -43,10 +42,7 @@ const DEFAULT_CATALOG = {
       material: "خامة عملية مناسبة للخروج والشغل",
     },
   },
-  shipping: {
-    cairoGiza: 70,
-    otherGovernorates: 90,
-  },
+  shipping: { cairoGiza: 70, otherGovernorates: 90 },
   notes: [
     "الأسعار بالجنيه المصري.",
     "لو محتاج مساعدة في المقاس: قولي وزنك وطولك وعايزه واسع ولا مظبوط.",
@@ -54,69 +50,71 @@ const DEFAULT_CATALOG = {
 };
 
 /**
- * ================== Gemini Setup ==================
- * IMPORTANT:
- * بعض الـ API keys ما بتدعمش موديلات معينة، فهنجرب fallback موديلات تلقائيًا.
+ * ================== Gemini Setup (Lazy init) ==================
  */
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
+const PRIMARY_MODEL = process.env.GEMINI_MODEL || "gemini-1.0-pro";
 
-// لو حطيت GEMINI_MODEL في env هنبدأ بيه
-const PRIMARY_MODEL = process.env.GEMINI_MODEL || "gemini-1.5-flash";
-
-// موديلات fallback شائعة
+// fallback موديلات شائعة
 const MODEL_CANDIDATES = [
   PRIMARY_MODEL,
+  "gemini-1.0-pro",
   "gemini-1.5-flash",
   "gemini-1.5-pro",
-  "gemini-1.0-pro",
 ];
 
 let model = null;
 let activeModelName = null;
+let geminiInitPromise = null;
 
-async function initGeminiModel() {
-  if (!GEMINI_API_KEY) {
-    console.warn("⚠️ GEMINI_API_KEY missing. Gemini disabled.");
-    return;
-  }
+async function initGeminiModelOnce() {
+  if (model || activeModelName) return;
+  if (geminiInitPromise) return geminiInitPromise;
 
-  const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
-
-  for (const m of MODEL_CANDIDATES) {
-    try {
-      const tryModel = genAI.getGenerativeModel({ model: m });
-      // test tiny call to ensure model is valid for generateContent
-      await tryModel.generateContent("ping");
-      model = tryModel;
-      activeModelName = m;
-      console.log(`🤖 Gemini ready: ${m}`);
+  geminiInitPromise = (async () => {
+    if (!GEMINI_API_KEY) {
+      console.warn("⚠️ GEMINI_API_KEY missing. Gemini disabled.");
       return;
-    } catch (e) {
-      const msg = e?.message || String(e);
-      console.warn(`⚠️ Gemini model not usable (${m}): ${msg}`);
     }
-  }
 
-  console.error("❌ Gemini init failed: no usable model from candidates.");
+    // ⚠️ مهم: تأكد إن GEMINI_MODEL مش متسجل فيه API KEY بالغلط
+    if (PRIMARY_MODEL.startsWith("AIza")) {
+      console.error("❌ GEMINI_MODEL يبدو أنه API KEY بالغلط. حط GEMINI_API_KEY للـ key و GEMINI_MODEL لاسم موديل زي gemini-1.0-pro");
+      return;
+    }
+
+    const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
+
+    for (const m of MODEL_CANDIDATES) {
+      try {
+        const tryModel = genAI.getGenerativeModel({ model: m });
+        // اختبار خفيف جدًا (بيستهلك شوية، بس مرة واحدة عند البوت)
+        await tryModel.generateContent("ping");
+        model = tryModel;
+        activeModelName = m;
+        console.log(`🤖 Gemini ready: ${m}`);
+        return;
+      } catch (e) {
+        const msg = e?.message || String(e);
+        console.warn(`⚠️ Gemini model not usable (${m}): ${msg}`);
+      }
+    }
+
+    console.error("❌ Gemini init failed: no usable model from candidates.");
+  })();
+
+  return geminiInitPromise;
 }
-
-// init once at boot
-await initGeminiModel();
 
 /**
  * ================== FB Send ==================
  */
 async function sendText(psid, text, token) {
   if (!psid || !token || !text) return;
-
   try {
     await axios.post(
       "https://graph.facebook.com/v18.0/me/messages",
-      {
-        recipient: { id: psid },
-        messaging_type: "RESPONSE",
-        message: { text },
-      },
+      { recipient: { id: psid }, messaging_type: "RESPONSE", message: { text } },
       { params: { access_token: token } }
     );
   } catch (e) {
@@ -159,7 +157,7 @@ function looksLikeGreeting(t) {
 
 function isFAQishQuestion(t) {
   const s = normalizeArabic(t);
-  const keys = ["سعر", "بكام", "الشحن", "توصيل", "المحافظات", "القاهره", "الجيزه", "الالوان", "اللون", "المقاس", "مقاسات", "خامه", "خامه", "متاح", "موجود"];
+  const keys = ["سعر", "بكام", "الشحن", "توصيل", "المحافظات", "القاهره", "الجيزه", "الالوان", "اللون", "المقاس", "مقاسات", "خامه", "خامة", "متاح", "موجود"];
   return keys.some((k) => s.includes(normalizeArabic(k)));
 }
 
@@ -180,15 +178,12 @@ function detectGovernorateBucket(text) {
 }
 
 /**
- * ================== Session wrappers (compatibility) ==================
- * عشان لو session.js عندك لسه قديم (بياخد senderId بس)
+ * ================== Session wrappers ==================
  */
 async function getSession(senderId, botId, redis) {
   try {
-    // حاول بالباراميترز الجديدة
     return await _getSession(senderId, botId, redis);
   } catch {
-    // fallback للقديم
     return await _getSession(senderId);
   }
 }
@@ -202,16 +197,15 @@ async function setSession(senderId, botId, session, redis) {
 }
 
 /**
- * ================== Dedup (avoid repeated replies) ==================
- * key: egboot:dedup:<botId>:<mid> => "1" (TTL 60s)
+ * ================== Dedup ==================
+ * key: egboot:dedup:<botId>:<mid> TTL 60s
  */
 async function dedupCheck(redis, botId, mid) {
   if (!redis || !mid) return false;
   const key = `egboot:dedup:${botId}:${mid}`;
   try {
-    // SET NX EX 60
     const res = await redis.set(key, "1", "NX", "EX", 60);
-    return res !== "OK"; // لو مش OK يبقى already processed
+    return res !== "OK";
   } catch (e) {
     console.error("❌ dedup redis error:", e?.message || e);
     return false;
@@ -260,14 +254,14 @@ async function saveFAQ(redis, botId, userText, answerText) {
 function buildPrompt({ brandName, text, session, catalog }) {
   return `
 أنت موظف مبيعات شاطر ولطيف في متجر ملابس اسمه "${brandName}".
-بتتكلم عربي مصري مهذب، وتستخدم إيموجي خفيفة 😊.
+بتتكلم عربي مصري مهذب، وإيموجي خفيفة 😊.
 
-قواعد مهمة:
-- رد فقط على رسالة العميل الحالية (ممنوع تبدأ كلام من نفسك).
-- لو تحية: رد تحية وبس + سؤال لطيف مفتوح (من غير ضغط).
-- ممنوع تفرض قرار: (ممنوع "لازم تختار").
+قواعد:
+- رد فقط على رسالة العميل الحالية.
+- ممنوع تفرض قرار (ممنوع "لازم").
 - إجابة قصيرة (سطرين-3).
 - لو السؤال واضح من بيانات المتجر: جاوب مباشرة.
+- في الآخر اسأل سؤال واحد بسيط يساعد تكمل الطلب (من غير ضغط).
 
 بيانات المتجر:
 ${JSON.stringify(catalog, null, 2)}
@@ -313,7 +307,7 @@ function ruleAnswer(text, catalog) {
     if (s.includes("الوان") || s.includes("لون")) return `ألوان ${p.name} المتاحة: ${p.colors.join("، ")} 😊 تحب أنهي لون؟`;
     if (s.includes("مقاس") || s.includes("مقاسات") || s.includes("xl") || s.includes("xxl") || s.includes("2xl"))
       return `مقاسات ${p.name} المتاحة: ${p.sizes.join(" / ")} 😊 تحب أنهي مقاس؟`;
-    if (s.includes("خامه") || s.includes("خامه") || s.includes("جوده") || s.includes("جودة"))
+    if (s.includes("خامه") || s.includes("خامة") || s.includes("جوده") || s.includes("جودة"))
       return `خامة ${p.name}: ${p.material} 😊 تحب أساعدك تختار مقاس؟`;
   }
 
@@ -326,8 +320,7 @@ function ruleAnswer(text, catalog) {
 export async function salesReply({ botId = "clothes", senderId, text, pageAccessToken, redis, mid }) {
   if (!senderId || !text?.trim()) return;
 
-  // ✅ dedup by mid (prevents multiple same replies)
-  // لازم worker يبعت mid لو متاح، بس لو مش موجود مش مشكلة
+  // ✅ dedup
   const already = await dedupCheck(redis, botId, mid);
   if (already) {
     console.log("🟣 dedup: skipped duplicate mid:", mid);
@@ -337,7 +330,7 @@ export async function salesReply({ botId = "clothes", senderId, text, pageAccess
   let session = (await getSession(senderId, botId, redis)) || createDefaultSession();
   const catalog = DEFAULT_CATALOG;
 
-  // ✅ Greeting: رد لطيف من غير ضغط
+  // ✅ Greeting: "تحية بس" (زي ما انت عايز)
   if (looksLikeGreeting(text)) {
     const reply = `وعليكم السلام 😊 أهلًا بيك في ${catalog.brandName} 👋`;
     session.history.push({ user: text, bot: reply });
@@ -365,7 +358,9 @@ export async function salesReply({ botId = "clothes", senderId, text, pageAccess
     return;
   }
 
-  // ✅ Gemini for everything else
+  // ✅ Gemini (lazy init)
+  await initGeminiModelOnce();
+
   let replyText = null;
 
   if (model) {
