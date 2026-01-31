@@ -2,17 +2,18 @@
 import dotenv from "dotenv";
 import axios from "axios";
 import crypto from "crypto";
-
-// session helpers
-import { getSession as _getSession, setSession as _setSession, createDefaultSession } from "./session.js";
-
-// ✅ NEW SDK
 import { GoogleGenAI } from "@google/genai";
+
+import {
+  getSession as _getSession,
+  setSession as _setSession,
+  createDefaultSession,
+} from "./session.js";
 
 dotenv.config();
 
 /**
- * ================== Catalog ==================
+ * ================== Catalog (context only) ==================
  */
 const DEFAULT_CATALOG = {
   brandName: "Nour Fashion",
@@ -22,34 +23,27 @@ const DEFAULT_CATALOG = {
       price: 299,
       sizes: ["M", "L", "XL", "2XL"],
       colors: ["أسود", "أبيض", "كحلي", "رمادي", "بيج"],
-      material: "قطن مريح (جودة كويسة للاستخدام اليومي)",
     },
     hoodie: {
       name: "هودي",
       price: 599,
       sizes: ["M", "L", "XL", "2XL"],
       colors: ["أسود", "رمادي", "كحلي", "أبيض", "بيج"],
-      material: "خامة دافية مناسبة للشتا (قماش تقيل نسبيًا)",
     },
     shirt: {
       name: "قميص",
       price: 499,
       sizes: ["M", "L", "XL", "2XL"],
       colors: ["أسود", "أبيض", "كحلي", "رمادي", "بيج"],
-      material: "قماش عملي ومريح (ستايل كاجوال/سمارت)",
     },
     pants: {
       name: "بنطلون",
       price: 549,
       sizes: ["M", "L", "XL", "2XL"],
       colors: ["أسود", "كحلي", "رمادي", "بيج", "زيتي"],
-      material: "خامة عملية مناسبة للخروج والشغل",
     },
   },
-  shipping: {
-    cairoGiza: 70,
-    otherGovernorates: 90,
-  },
+  shipping: { cairoGiza: 70, otherGovernorates: 90 },
 };
 
 /**
@@ -58,12 +52,16 @@ const DEFAULT_CATALOG = {
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
 const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
 
+// لو حبيت توقف Gemini من غير ما تمسح keys:
+// حط GEMINI_DISABLED=1 في env
+const GEMINI_DISABLED = String(process.env.GEMINI_DISABLED || "0") === "1";
+
 let ai = null;
-if (GEMINI_API_KEY) {
+if (GEMINI_API_KEY && !GEMINI_DISABLED) {
   ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
   console.log(`🤖 Gemini client ready (model: ${GEMINI_MODEL})`);
 } else {
-  console.warn("⚠️ GEMINI_API_KEY missing. Gemini disabled.");
+  console.warn("⚠️ Gemini disabled (missing key or GEMINI_DISABLED=1).");
 }
 
 /**
@@ -107,46 +105,57 @@ function sha1(text) {
   return crypto.createHash("sha1").update(text).digest("hex");
 }
 
-function looksLikeGreeting(t) {
-  const s = normalizeArabic(t);
-  return s.includes("السلام عليكم") || s === "سلام" || s.includes("اهلا") || s.includes("هاي") || s.includes("hi");
+function tokenize(text) {
+  const s = normalizeArabic(text);
+  if (!s) return [];
+  // شيل الكلمات القصيرة جدًا
+  return s.split(" ").filter((w) => w.length >= 2);
 }
 
-function detectProduct(text) {
-  const s = normalizeArabic(text);
-  if (s.includes("تيشير") || s.includes("تي شير") || s.includes("tshirt")) return "tshirt";
-  if (s.includes("هودي") || s.includes("hoodie")) return "hoodie";
-  if (s.includes("قميص") || s.includes("shirt")) return "shirt";
-  if (s.includes("بنطلون") || s.includes("pantalon") || s.includes("pants")) return "pants";
-  return null;
-}
-
-function extractColor(text, catalog) {
-  const s = normalizeArabic(text);
-  const allColors = new Set();
-  Object.values(catalog.categories).forEach((c) => c.colors.forEach((x) => allColors.add(normalizeArabic(x))));
-  for (const c of allColors) {
-    if (s.includes(c)) return c;
+function safeExtractJSON(text) {
+  if (!text) return null;
+  const s = String(text).trim();
+  const first = s.indexOf("{");
+  const last = s.lastIndexOf("}");
+  if (first === -1 || last === -1 || last <= first) return null;
+  try {
+    return JSON.parse(s.slice(first, last + 1));
+  } catch {
+    return null;
   }
-  return null;
 }
 
-function extractSize(text) {
-  const m = /(^|\s)(2XL|XXL|XL|L|M|S)(\s|$)/i.exec(text);
-  if (m?.[2]) return m[2].toUpperCase();
-  return null;
+/**
+ * Similarity: Dice coefficient on word bigrams (بسيطة وسريعة)
+ */
+function bigramsWords(words) {
+  const bg = [];
+  for (let i = 0; i < words.length - 1; i++) bg.push(words[i] + "_" + words[i + 1]);
+  return bg;
 }
 
-function detectGovernorateBucket(text) {
-  const s = normalizeArabic(text);
-  if (s.includes("القاهره") || s.includes("الجيزه")) return "cairoGiza";
-  return "otherGovernorates";
-}
+function diceSimilarity(aText, bText) {
+  const a = tokenize(aText);
+  const b = tokenize(bText);
+  if (!a.length || !b.length) return 0;
 
-function extractPhone(text) {
-  const digits = String(text).replace(/[^\d]/g, "");
-  if (digits.length >= 10 && digits.length <= 15) return digits;
-  return null;
+  const A = bigramsWords(a);
+  const B = bigramsWords(b);
+  if (!A.length || !B.length) return 0;
+
+  const setA = new Map();
+  for (const x of A) setA.set(x, (setA.get(x) || 0) + 1);
+
+  let intersect = 0;
+  for (const y of B) {
+    const c = setA.get(y) || 0;
+    if (c > 0) {
+      intersect += 1;
+      setA.set(y, c - 1);
+    }
+  }
+
+  return (2 * intersect) / (A.length + B.length);
 }
 
 /**
@@ -169,7 +178,7 @@ async function setSession(senderId, botId, session, redis) {
 }
 
 /**
- * ================== Dedup ==================
+ * ================== Dedup (avoid repeated replies) ==================
  */
 async function dedupCheck(redis, botId, mid) {
   if (!redis || !mid) return false;
@@ -184,192 +193,181 @@ async function dedupCheck(redis, botId, mid) {
 }
 
 /**
- * ================== FAQ Cache ==================
+ * ================== Knowledge Base (VERY IMPORTANT) ==================
+ * 1) FAQ Hash:     egboot:kb:<botId>           field=sha1(qNorm) value=JSON
+ * 2) Text Hash:    egboot:kb_text:<botId>      field=qNorm       value=sha1(qNorm)
+ * 3) Index Sets:   egboot:kb_idx:<botId>:<tok> => Set of field hashes
+ *
+ * ليه؟ عشان البحث يبقى سريع ونحافظ على الداتا
  */
-async function getCachedFAQ(redis, botId, userText) {
-  if (!redis) return null;
-  const nq = normalizeArabic(userText);
-  if (!nq) return null;
+async function kbSave(redis, botId, userText, replyText, tags) {
+  if (!redis) return;
 
-  const key = `egboot:faq:${botId}`;
-  const field = sha1(nq);
+  const qNorm = normalizeArabic(userText);
+  if (!qNorm) return;
+
+  const field = sha1(qNorm);
+
+  const kbKey = `egboot:kb:${botId}`;
+  const kbTextKey = `egboot:kb_text:${botId}`;
+
+  const payload = {
+    q: userText,
+    qNorm,
+    a: replyText,
+    tags: tags || {},
+    ts: Date.now(),
+    hits: 0,
+  };
 
   try {
-    return (await redis.hget(key, field)) || null;
+    // حفظ الإجابة (من أول مرة)
+    await redis.hset(kbKey, field, JSON.stringify(payload));
+
+    // خريطة النص -> field (للـ exact match السريع)
+    await redis.hset(kbTextKey, qNorm, field);
+
+    // بناء index بالكلمات
+    const toks = tokenize(qNorm);
+    for (const t of toks) {
+      const idxKey = `egboot:kb_idx:${botId}:${t}`;
+      await redis.sadd(idxKey, field);
+      // نخلي الـ index يعيش شهرين مثلًا
+      await redis.expire(idxKey, 60 * 60 * 24 * 60);
+    }
+
+    // TTL للـ KB نفسه (اختياري)
+    await redis.expire(kbKey, 60 * 60 * 24 * 90);
+    await redis.expire(kbTextKey, 60 * 60 * 24 * 90);
   } catch (e) {
-    console.error("❌ FAQ hget error:", e?.message || e);
+    console.error("❌ kbSave redis error:", e?.message || e);
+  }
+}
+
+async function kbGetExact(redis, botId, userText) {
+  if (!redis) return null;
+  const qNorm = normalizeArabic(userText);
+  if (!qNorm) return null;
+
+  const kbKey = `egboot:kb:${botId}`;
+  const kbTextKey = `egboot:kb_text:${botId}`;
+
+  try {
+    const field = await redis.hget(kbTextKey, qNorm);
+    if (!field) return null;
+
+    const raw = await redis.hget(kbKey, field);
+    if (!raw) return null;
+
+    const data = JSON.parse(raw);
+    return { field, data };
+  } catch {
     return null;
   }
 }
 
-async function saveFAQ(redis, botId, userText, answerText) {
-  if (!redis) return;
-  const nq = normalizeArabic(userText);
-  if (!nq) return;
+async function kbRetrieve(redis, botId, userText) {
+  if (!redis) return null;
 
-  const key = `egboot:faq:${botId}`;
-  const field = sha1(nq);
+  // 1) exact
+  const exact = await kbGetExact(redis, botId, userText);
+  if (exact?.data?.a) return { answer: exact.data.a, score: 1.0 };
+
+  // 2) indexed candidates
+  const qNorm = normalizeArabic(userText);
+  const toks = tokenize(qNorm);
+  if (!toks.length) return null;
+
+  // اجمع مرشحين من أول 5 كلمات (كفاية)
+  const topToks = toks.slice(0, 5);
+  const keys = topToks.map((t) => `egboot:kb_idx:${botId}:${t}`);
+
+  let candidateFields = [];
+  try {
+    // SUNION
+    const union = await redis.sunion(keys);
+    candidateFields = union || [];
+  } catch (e) {
+    console.error("❌ kbRetrieve sunion error:", e?.message || e);
+    return null;
+  }
+
+  if (!candidateFields.length) return null;
+
+  // اسحب بيانات المرشحين (حد أقصى 30)
+  const kbKey = `egboot:kb:${botId}`;
+  const sample = candidateFields.slice(0, 30);
+
+  let best = { score: 0, answer: null };
 
   try {
-    await redis.hset(key, field, answerText);
-    await redis.expire(key, 60 * 60 * 24 * 30);
+    const raws = await redis.hmget(kbKey, ...sample);
+    for (const raw of raws) {
+      if (!raw) continue;
+      const data = JSON.parse(raw);
+      const score = diceSimilarity(qNorm, data.qNorm);
+      if (score > best.score) {
+        best.score = score;
+        best.answer = data.a;
+      }
+    }
   } catch (e) {
-    console.error("❌ FAQ hset error:", e?.message || e);
+    console.error("❌ kbRetrieve hmget error:", e?.message || e);
+    return null;
   }
+
+  // threshold: لو أقل من 0.45 غالبًا مش قريب
+  if (best.answer && best.score >= 0.45) {
+    return { answer: best.answer, score: best.score };
+  }
+
+  return null;
 }
 
 /**
- * ================== Smart Flow (stage/slots) ==================
+ * ================== Gemini Prompt (STRICT JSON) ==================
+ * Gemini بيرد + يطلع tags (intent/product) عشان KB تبقى “منظمة”
  */
-function ensureSessionShape(session) {
-  session.history = session.history || [];
-  session.stage = session.stage || "ai";
-  session.slots = session.slots || {
-    product: null,
-    color: null, // normalized
-    size: null,
-    cityBucket: null,
-    customerName: null,
-    phone: null,
-    address: null,
-  };
-  return session;
-}
-
-function formatColorForCatalog(normalizedColor, productKey, catalog) {
-  if (!normalizedColor) return null;
-  const colors = catalog.categories[productKey]?.colors || [];
-  const found = colors.find((c) => normalizeArabic(c) === normalizedColor);
-  return found || null;
-}
-
-function checkoutSummary(session, catalog) {
-  const { product, color, size, cityBucket } = session.slots;
-  const p = catalog.categories[product];
-  const shipping = cityBucket === "cairoGiza" ? catalog.shipping.cairoGiza : catalog.shipping.otherGovernorates;
-  const total = p.price + shipping;
-
-  return {
-    shipping,
-    total,
-    productName: p.name,
-    price: p.price,
-    colorLabel: formatColorForCatalog(color, product, catalog),
-    size,
-  };
-}
-
-function buildGeminiPrompt({ catalog, session, userText }) {
+function buildGeminiPrompt({ catalog, history, userText }) {
   return `
 أنت موظف مبيعات مصري شاطر وودود لمتجر ملابس اسمه "${catalog.brandName}".
-
-هدفك:
-1) ترد على رسالة العميل رد طبيعي ولطيف.
-2) تستخرج من كلام العميل إن أمكن:
-- product: (tshirt|hoodie|shirt|pants|null)
-- color: لون عربي موجود في الكتالوج أو null
-- size: (M|L|XL|2XL|null)
-- cityBucket: (cairoGiza|otherGovernorates|null) لو العميل ذكر محافظة/قاهرة/جيزة
+ردّ على رسالة العميل رد طبيعي مختصر (سطرين-3) وبإيموجي خفيفة 😊.
 
 مهم جدًا:
-- متكتبش غير JSON فقط (بدون أي نص خارجه).
-- JSON بالشكل ده بالظبط:
+- اكتب JSON فقط بدون أي كلام خارج JSON.
+- الشكل الإجباري:
 {
   "reply": "string",
-  "slots": { "product": "...", "color": "...", "size": "...", "cityBucket": "..." }
+  "tags": {
+    "intent": "ask_shipping|ask_price|ask_sizes|ask_colors|ask_available|smalltalk|order_interest|other",
+    "product": "tshirt|hoodie|shirt|pants|null"
+  }
 }
 
-بيانات الكتالوج:
+بيانات المتجر:
 ${JSON.stringify(catalog, null, 2)}
 
-آخر سياق مختصر:
-${JSON.stringify(session.history.slice(-6), null, 2)}
+آخر 6 رسائل (سياق):
+${JSON.stringify(history.slice(-6), null, 2)}
 
 رسالة العميل:
 "${userText}"
 `;
 }
 
-function safeExtractJSON(text) {
-  if (!text) return null;
-  const s = String(text).trim();
-  const first = s.indexOf("{");
-  const last = s.lastIndexOf("}");
-  if (first === -1 || last === -1 || last <= first) return null;
-  const candidate = s.slice(first, last + 1);
-  try {
-    return JSON.parse(candidate);
-  } catch {
-    return null;
-  }
-}
-
-function fillSlotsFromText(session, text, catalog) {
-  const prod = detectProduct(text);
-  const colorNorm = extractColor(text, catalog);
-  const size = extractSize(text);
-
-  if (prod && !session.slots.product) session.slots.product = prod;
-  if (colorNorm && !session.slots.color) session.slots.color = colorNorm;
-  if (size && !session.slots.size) session.slots.size = size;
-
-  const s = normalizeArabic(text);
-  if ((s.includes("القاهره") || s.includes("الجيزه") || s.includes("محافظ")) && !session.slots.cityBucket) {
-    session.slots.cityBucket = detectGovernorateBucket(text);
-  }
-
-  const phone = extractPhone(text);
-  if (phone && !session.slots.phone) session.slots.phone = phone;
-}
-
-function slotsReadyForCheckout(session) {
-  const { product, color, size } = session.slots;
-  return Boolean(product && color && size);
-}
-
-function nextQuestionForSlots(session, catalog) {
-  const { product, color, size } = session.slots;
-
-  if (!product) return `تحب تشوف إيه من المتاح؟ (تيشيرت/هودي/قميص/بنطلون) 😊`;
-
-  const p = catalog.categories[product];
-  if (!color) return `تمام 😊 تحب أنهي لون في ${p.name}؟ المتاح: ${p.colors.join("، ")}`;
-  if (!size) return `جميل 😊 تحب أنهي مقاس؟ المتاح: ${p.sizes.join(" / ")}`;
-
-  return null;
-}
-
-async function handleCheckout(session, text, catalog) {
-  const s = normalizeArabic(text);
-
-  if (!session.slots.customerName && (s.includes("اسمي") || s.includes("انا") || text.trim().length <= 25)) {
-    if (text.trim().length >= 3 && text.trim().length <= 30) session.slots.customerName = text.trim();
-  }
-
-  if (!session.slots.address && (s.includes("عنوان") || s.includes("شارع") || s.includes("ميدان") || text.trim().length > 25)) {
-    session.slots.address = text.trim();
-  }
-
-  const phone = extractPhone(text);
-  if (phone && !session.slots.phone) session.slots.phone = phone;
-
-  const missing = [];
-  if (!session.slots.customerName) missing.push("الاسم");
-  if (!session.slots.phone) missing.push("رقم الموبايل");
-  if (!session.slots.address) missing.push("العنوان");
-
-  if (missing.length) {
-    return `تمام 😊 ابعتلي ${missing.join(" + ")} عشان أكدلك الأوردر.`;
-  }
-
-  const sum = checkoutSummary(session, catalog);
-  return `تمام ✅ أوردر: ${sum.productName} (${sum.colorLabel}) مقاس ${sum.size}\nالسعر ${sum.price} + شحن ${sum.shipping} = الإجمالي ${sum.total} جنيه.\nتأكيد؟ (نعم/لا) 😊`;
-}
-
 /**
  * ================== Main Entry ==================
+ * - Gemini ON: يرد + نسجل من أول مرة
+ * - Gemini OFF: نرد من KB (retrieval) كأنه Gemini
  */
-export async function salesReply({ botId = "clothes", senderId, text, pageAccessToken, redis, mid }) {
+export async function salesReply({
+  botId = "clothes",
+  senderId,
+  text,
+  pageAccessToken,
+  redis,
+  mid,
+}) {
   if (!senderId || !text?.trim()) return;
 
   const already = await dedupCheck(redis, botId, mid);
@@ -377,94 +375,65 @@ export async function salesReply({ botId = "clothes", senderId, text, pageAccess
 
   const catalog = DEFAULT_CATALOG;
 
-  let session = ensureSessionShape((await getSession(senderId, botId, redis)) || createDefaultSession());
-  fillSlotsFromText(session, text, catalog);
+  let session =
+    (await getSession(senderId, botId, redis)) || createDefaultSession();
+  session.history = session.history || [];
 
-  // ✅ FAQ first
-  const cached = await getCachedFAQ(redis, botId, text);
-  if (cached) {
-    session.history.push({ user: text, bot: cached });
-    await setSession(senderId, botId, session, redis);
-    await sendText(senderId, cached, pageAccessToken);
-    return;
-  }
+  // ================== OFFLINE MODE (No Gemini) ==================
+  if (!ai) {
+    const got = await kbRetrieve(redis, botId, text);
+    const reply =
+      got?.answer ||
+      `أهلًا بيك 😊 تحب تشوف المتاح ولا عندك منتج معين؟`;
 
-  // ✅ greeting
-  if (looksLikeGreeting(text)) {
-    const reply = `وعليكم السلام 😊 أهلًا بيك في ${catalog.brandName} 👋 تحب تدور على إيه النهارده؟`;
     session.history.push({ user: text, bot: reply });
     await setSession(senderId, botId, session, redis);
     await sendText(senderId, reply, pageAccessToken);
-    await saveFAQ(redis, botId, text, reply);
+
+    // حتى في offline: نسجل لو الرد fallback (عشان نعرف الأسئلة الناقصة)
+    await kbSave(redis, botId, text, reply, { intent: "other", product: null });
     return;
   }
 
-  // ✅ once slots complete → checkout
-  if (slotsReadyForCheckout(session)) session.stage = "checkout";
-
-  // ✅ checkout stage
-  if (session.stage === "checkout") {
-    const reply = await handleCheckout(session, text, catalog);
-    session.history.push({ user: text, bot: reply });
-    await setSession(senderId, botId, session, redis);
-    await sendText(senderId, reply, pageAccessToken);
-    await saveFAQ(redis, botId, text, reply);
-    return;
-  }
-
-  // ✅ AI stage
-  const slotQuestion = nextQuestionForSlots(session, catalog);
-
+  // ================== ONLINE MODE (Gemini) ==================
   let replyText = null;
+  let tags = { intent: "other", product: null };
 
-  if (ai) {
-    try {
-      const prompt = buildGeminiPrompt({ catalog, session, userText: text });
+  try {
+    const prompt = buildGeminiPrompt({
+      catalog,
+      history: session.history,
+      userText: text,
+    });
 
-      // ✅✅✅ FIX: contents MUST be array with role + parts
-      const resp = await ai.models.generateContent({
-        model: GEMINI_MODEL,
-        contents: [
-          {
-            role: "user",
-            parts: [{ text: prompt }],
-          },
-        ],
-      });
+    const resp = await ai.models.generateContent({
+      model: GEMINI_MODEL,
+      contents: prompt,
+    });
 
-      const raw = resp?.text || "";
-      const parsed = safeExtractJSON(raw);
+    const raw = resp?.text || "";
+    const parsed = safeExtractJSON(raw);
 
-      if (parsed?.reply) replyText = parsed.reply;
-
-      const gs = parsed?.slots || {};
-      if (gs.product && !session.slots.product) session.slots.product = gs.product;
-      if (gs.color && !session.slots.color) session.slots.color = normalizeArabic(gs.color);
-      if (gs.size && !session.slots.size) session.slots.size = String(gs.size).toUpperCase();
-      if (gs.cityBucket && !session.slots.cityBucket) session.slots.cityBucket = gs.cityBucket;
-
-      if (slotsReadyForCheckout(session)) {
-        session.stage = "checkout";
-        const sum = checkoutSummary(session, catalog);
-        replyText =
-          replyText ||
-          `تمام ✅ اخترت ${sum.productName} (${sum.colorLabel}) مقاس ${sum.size}. ابعتلي الاسم + رقم الموبايل + العنوان عشان أكد الأوردر 😊`;
-      }
-    } catch (e) {
-      console.error("⚠️ Gemini failed:", e?.message || e);
-      replyText = null;
-    }
-  } else {
-    console.warn("⚠️ Gemini disabled (missing GEMINI_API_KEY).");
+    if (parsed?.reply) replyText = String(parsed.reply).trim();
+    if (parsed?.tags) tags = parsed.tags;
+  } catch (e) {
+    console.error("⚠️ Gemini failed:", e?.message || e);
+    replyText = null;
   }
 
   if (!replyText) {
-    replyText = slotQuestion || `تمام 😊 قولي تحب تيشيرت ولا هودي ولا قميص ولا بنطلون؟`;
+    // لو Gemini وقع… جرب KB فورًا
+    const got = await kbRetrieve(redis, botId, text);
+    replyText =
+      got?.answer ||
+      `تمام 😊 تحب تشوف تيشيرت ولا هودي ولا قميص ولا بنطلون؟`;
   }
 
+  // send + session
   session.history.push({ user: text, bot: replyText });
   await setSession(senderId, botId, session, redis);
   await sendText(senderId, replyText, pageAccessToken);
 
-  await saveFAQ(redis, botId, text, replyText);
+  // ✅ تسجيل من أول مرة (الأهم)
+  await kbSave(redis, botId, text, replyText, tags);
 }
