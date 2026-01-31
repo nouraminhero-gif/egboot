@@ -4,13 +4,12 @@ import axios from "axios";
 import crypto from "crypto";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 
-import { getSession, setSession, createDefaultSession } from "./session.js";
+import { getSession as _getSession, setSession as _setSession, createDefaultSession } from "./session.js";
 
 dotenv.config();
 
 /**
  * ================== Catalog (clothes bot) ==================
- * تقدر بعدين تخليه per-bot من Redis.
  */
 const DEFAULT_CATALOG = {
   brandName: "Nour Fashion",
@@ -56,24 +55,53 @@ const DEFAULT_CATALOG = {
 
 /**
  * ================== Gemini Setup ==================
- * مهم: استخدم موديل حديث. (مثال رسمي: gemini-2.5-flash)  1
+ * IMPORTANT:
+ * بعض الـ API keys ما بتدعمش موديلات معينة، فهنجرب fallback موديلات تلقائيًا.
  */
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
+
+// لو حطيت GEMINI_MODEL في env هنبدأ بيه
+const PRIMARY_MODEL = process.env.GEMINI_MODEL || "gemini-1.5-flash";
+
+// موديلات fallback شائعة
+const MODEL_CANDIDATES = [
+  PRIMARY_MODEL,
+  "gemini-1.5-flash",
+  "gemini-1.5-pro",
+  "gemini-1.0-pro",
+];
 
 let model = null;
+let activeModelName = null;
 
-if (GEMINI_API_KEY) {
-  try {
-    const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
-    model = genAI.getGenerativeModel({ model: GEMINI_MODEL });
-    console.log(`🤖 Gemini ready: ${GEMINI_MODEL}`);
-  } catch (e) {
-    console.error("❌ Gemini init failed:", e?.message || e);
+async function initGeminiModel() {
+  if (!GEMINI_API_KEY) {
+    console.warn("⚠️ GEMINI_API_KEY missing. Gemini disabled.");
+    return;
   }
-} else {
-  console.warn("⚠️ GEMINI_API_KEY missing. Gemini disabled.");
+
+  const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
+
+  for (const m of MODEL_CANDIDATES) {
+    try {
+      const tryModel = genAI.getGenerativeModel({ model: m });
+      // test tiny call to ensure model is valid for generateContent
+      await tryModel.generateContent("ping");
+      model = tryModel;
+      activeModelName = m;
+      console.log(`🤖 Gemini ready: ${m}`);
+      return;
+    } catch (e) {
+      const msg = e?.message || String(e);
+      console.warn(`⚠️ Gemini model not usable (${m}): ${msg}`);
+    }
+  }
+
+  console.error("❌ Gemini init failed: no usable model from candidates.");
 }
+
+// init once at boot
+await initGeminiModel();
 
 /**
  * ================== FB Send ==================
@@ -97,7 +125,7 @@ async function sendText(psid, text, token) {
 }
 
 /**
- * ================== Small utils ==================
+ * ================== Utils ==================
  */
 function normalizeArabic(s = "") {
   return String(s)
@@ -107,7 +135,7 @@ function normalizeArabic(s = "") {
     .replace(/[ؤ]/g, "و")
     .replace(/[ئ]/g, "ي")
     .replace(/[ة]/g, "ه")
-    .replace(/[ًٌٍَُِّْـ]/g, "") // تشكيل
+    .replace(/[ًٌٍَُِّْـ]/g, "")
     .replace(/[^\p{L}\p{N}\s]/gu, " ")
     .replace(/\s+/g, " ")
     .trim();
@@ -124,7 +152,6 @@ function looksLikeGreeting(t) {
     s.includes("سلام عليكم") ||
     s === "سلام" ||
     s.includes("اهلا") ||
-    s.includes("أهلا") ||
     s.includes("هاي") ||
     s.includes("hi")
   );
@@ -132,24 +159,7 @@ function looksLikeGreeting(t) {
 
 function isFAQishQuestion(t) {
   const s = normalizeArabic(t);
-  // أسئلة متكررة غالبًا
-  const keys = [
-    "سعر",
-    "بكام",
-    "الشحن",
-    "توصيل",
-    "المحافظات",
-    "القاهره",
-    "الجيزه",
-    "الالوان",
-    "اللون",
-    "المقاس",
-    "مقاسات",
-    "خامه",
-    "خامة",
-    "متاح",
-    "موجود",
-  ];
+  const keys = ["سعر", "بكام", "الشحن", "توصيل", "المحافظات", "القاهره", "الجيزه", "الالوان", "اللون", "المقاس", "مقاسات", "خامه", "خامه", "متاح", "موجود"];
   return keys.some((k) => s.includes(normalizeArabic(k)));
 }
 
@@ -164,19 +174,52 @@ function detectProduct(text) {
 
 function detectGovernorateBucket(text) {
   const s = normalizeArabic(text);
-  if (s.includes("القاهره") || s.includes("القاهرة") || s.includes("الجيزه") || s.includes("الجيزة")) {
-    return "cairoGiza";
-  }
-  // لو قال "محافظات" أو "اسيوط" الخ… اعتبرها محافظات
+  if (s.includes("القاهره") || s.includes("الجيزه")) return "cairoGiza";
   if (s.includes("محافظ") || s.includes("اسيوط") || s.includes("أسيوط")) return "otherGovernorates";
   return null;
 }
 
 /**
+ * ================== Session wrappers (compatibility) ==================
+ * عشان لو session.js عندك لسه قديم (بياخد senderId بس)
+ */
+async function getSession(senderId, botId, redis) {
+  try {
+    // حاول بالباراميترز الجديدة
+    return await _getSession(senderId, botId, redis);
+  } catch {
+    // fallback للقديم
+    return await _getSession(senderId);
+  }
+}
+
+async function setSession(senderId, botId, session, redis) {
+  try {
+    return await _setSession(senderId, botId, session, redis);
+  } catch {
+    return await _setSession(senderId, session);
+  }
+}
+
+/**
+ * ================== Dedup (avoid repeated replies) ==================
+ * key: egboot:dedup:<botId>:<mid> => "1" (TTL 60s)
+ */
+async function dedupCheck(redis, botId, mid) {
+  if (!redis || !mid) return false;
+  const key = `egboot:dedup:${botId}:${mid}`;
+  try {
+    // SET NX EX 60
+    const res = await redis.set(key, "1", "NX", "EX", 60);
+    return res !== "OK"; // لو مش OK يبقى already processed
+  } catch (e) {
+    console.error("❌ dedup redis error:", e?.message || e);
+    return false;
+  }
+}
+
+/**
  * ================== FAQ Cache (Redis) ==================
- * key: egboot:faq:<botId>  (HASH)
- * field: sha1(normalizedQuestion)
- * value: answerText
  */
 async function getCachedFAQ(redis, botId, userText) {
   if (!redis) return null;
@@ -185,6 +228,7 @@ async function getCachedFAQ(redis, botId, userText) {
 
   const key = `egboot:faq:${botId}`;
   const field = sha1(nq);
+
   try {
     const val = await redis.hget(key, field);
     return val || null;
@@ -204,7 +248,6 @@ async function saveFAQ(redis, botId, userText, answerText) {
 
   try {
     await redis.hset(key, field, answerText);
-    // optional: expire بعد 30 يوم
     await redis.expire(key, 60 * 60 * 24 * 30);
   } catch (e) {
     console.error("❌ FAQ hset error:", e?.message || e);
@@ -213,20 +256,18 @@ async function saveFAQ(redis, botId, userText, answerText) {
 
 /**
  * ================== Prompt ==================
- * شخصية ألطف + ما تفرضش
  */
 function buildPrompt({ brandName, text, session, catalog }) {
   return `
 أنت موظف مبيعات شاطر ولطيف في متجر ملابس اسمه "${brandName}".
-بتتكلم "عربي مصري" بطريقة مهذبة ومريحة، وتستخدم إيموجي بسيطة 😊 (بدون مبالغة).
+بتتكلم عربي مصري مهذب، وتستخدم إيموجي خفيفة 😊.
 
-قواعد مهمة جدًا:
-- ما تبدأش كلام من نفسك. ردّ فقط على رسالة العميل الحالية.
-- لو العميل قال "السلام عليكم" أو تحية: رد بتحية لطيفة الأول.
-- ما تفرضش على العميل قرارات (ممنوع: "لازم تختار المقاس دلوقتي").
-- خليك مساعد: قدّم اختيارات + سؤال واحد بسيط في الآخر.
-- إجابات قصيرة وواضحة (سطرين–3 بالكتير).
-- لو السؤال عن شحن/سعر/ألوان/مقاسات/خامة: جاوب مباشرة من البيانات.
+قواعد مهمة:
+- رد فقط على رسالة العميل الحالية (ممنوع تبدأ كلام من نفسك).
+- لو تحية: رد تحية وبس + سؤال لطيف مفتوح (من غير ضغط).
+- ممنوع تفرض قرار: (ممنوع "لازم تختار").
+- إجابة قصيرة (سطرين-3).
+- لو السؤال واضح من بيانات المتجر: جاوب مباشرة.
 
 بيانات المتجر:
 ${JSON.stringify(catalog, null, 2)}
@@ -242,58 +283,38 @@ ${JSON.stringify(session, null, 2)}
 }
 
 /**
- * ================== Fast rule-based answers ==================
- * عشان الحاجات الواضحة من غير Gemini (وممكن Gemini يكمل للباقي)
+ * ================== Rule-based quick answers ==================
  */
 function ruleAnswer(text, catalog) {
   const s = normalizeArabic(text);
 
-  // الشحن
   if (s.includes("شحن") || s.includes("توصيل")) {
     const bucket = detectGovernorateBucket(text);
-    if (bucket === "cairoGiza") {
-      return `تمام 😊 شحن القاهرة والجيزة ${catalog.shipping.cairoGiza} جنيه. تحب الشحن فين بالظبط؟`;
-    }
-    if (bucket === "otherGovernorates" || s.includes("محافظ")) {
-      return `تمام 😊 شحن المحافظات ${catalog.shipping.otherGovernorates} جنيه. تحب الشحن لأي محافظة؟`;
-    }
+    if (bucket === "cairoGiza") return `تمام 😊 شحن القاهرة والجيزة ${catalog.shipping.cairoGiza} جنيه. تحب الشحن فين بالظبط؟`;
+    if (bucket === "otherGovernorates" || s.includes("محافظ")) return `تمام 😊 شحن المحافظات ${catalog.shipping.otherGovernorates} جنيه. تحب الشحن لأي محافظة؟`;
     return `الشحن: القاهرة/الجيزة ${catalog.shipping.cairoGiza} جنيه — باقي المحافظات ${catalog.shipping.otherGovernorates} جنيه 😊 تحب الشحن فين؟`;
   }
 
-  // أسعار
   if (s.includes("سعر") || s.includes("بكام") || s.includes("بكم")) {
-    const lines = Object.values(catalog.categories)
-      .map((c) => `• ${c.name}: ${c.price} جنيه`)
-      .join("\n");
+    const lines = Object.values(catalog.categories).map((c) => `• ${c.name}: ${c.price} جنيه`).join("\n");
     return `أكيد 😊 دي الأسعار:\n${lines}\nتحب أنهي منتج؟`;
   }
 
-  // متاح إيه؟
   if (s.includes("المتاح") || s.includes("موجود") || s.includes("عندكم اي") || s.includes("عندكو اي")) {
     const items = Object.values(catalog.categories).map((c) => c.name).join("، ");
     return `أهلًا بيك 😊 المتاح عندنا حاليًا: ${items}. تحب تشوف أنهي واحد؟`;
   }
 
-  // لو ذكر منتج + لون/مقاس
   const prodKey = detectProduct(text);
   if (prodKey) {
     const p = catalog.categories[prodKey];
     if (!p) return null;
 
-    // ألوان
-    if (s.includes("الوان") || s.includes("ألوان") || s.includes("لون")) {
-      return `ألوان ${p.name} المتاحة: ${p.colors.join("، ")} 😊 تحب أنهي لون؟`;
-    }
-
-    // مقاسات
-    if (s.includes("مقاس") || s.includes("مقاسات") || s.includes("xl") || s.includes("xxl") || s.includes("2xl")) {
+    if (s.includes("الوان") || s.includes("لون")) return `ألوان ${p.name} المتاحة: ${p.colors.join("، ")} 😊 تحب أنهي لون؟`;
+    if (s.includes("مقاس") || s.includes("مقاسات") || s.includes("xl") || s.includes("xxl") || s.includes("2xl"))
       return `مقاسات ${p.name} المتاحة: ${p.sizes.join(" / ")} 😊 تحب أنهي مقاس؟`;
-    }
-
-    // خامة
-    if (s.includes("خامه") || s.includes("خامة") || s.includes("جوده") || s.includes("جودة")) {
+    if (s.includes("خامه") || s.includes("خامه") || s.includes("جوده") || s.includes("جودة"))
       return `خامة ${p.name}: ${p.material} 😊 تحب أساعدك تختار مقاس؟`;
-    }
   }
 
   return null;
@@ -302,25 +323,30 @@ function ruleAnswer(text, catalog) {
 /**
  * ================== Main Entry ==================
  */
-export async function salesReply({ botId = "clothes", senderId, text, pageAccessToken, redis }) {
+export async function salesReply({ botId = "clothes", senderId, text, pageAccessToken, redis, mid }) {
   if (!senderId || !text?.trim()) return;
 
-  // 1) session
-  let session = (await getSession(senderId, botId, redis)) || createDefaultSession();
+  // ✅ dedup by mid (prevents multiple same replies)
+  // لازم worker يبعت mid لو متاح، بس لو مش موجود مش مشكلة
+  const already = await dedupCheck(redis, botId, mid);
+  if (already) {
+    console.log("🟣 dedup: skipped duplicate mid:", mid);
+    return;
+  }
 
-  // 2) catalog (later: per botId from Redis)
+  let session = (await getSession(senderId, botId, redis)) || createDefaultSession();
   const catalog = DEFAULT_CATALOG;
 
-  // 3) Greeting handling (رد تحية محترم)
+  // ✅ Greeting: رد لطيف من غير ضغط
   if (looksLikeGreeting(text)) {
-    const reply = `وعليكم السلام 😊 أهلًا بيك! تحب تشوف المتاح ولا عندك منتج في بالك؟`;
+    const reply = `وعليكم السلام 😊 أهلًا بيك في ${catalog.brandName} 👋`;
     session.history.push({ user: text, bot: reply });
     await setSession(senderId, botId, session, redis);
     await sendText(senderId, reply, pageAccessToken);
     return;
   }
 
-  // 4) FAQ cache (لو السؤال اتسأل قبل كده)
+  // ✅ FAQ cache
   const cached = await getCachedFAQ(redis, botId, text);
   if (cached) {
     session.history.push({ user: text, bot: cached });
@@ -329,48 +355,41 @@ export async function salesReply({ botId = "clothes", senderId, text, pageAccess
     return;
   }
 
-  // 5) rule-based quick answer (لو واضح من غير Gemini)
+  // ✅ rule quick
   const quick = ruleAnswer(text, catalog);
   if (quick) {
     session.history.push({ user: text, bot: quick });
     await setSession(senderId, botId, session, redis);
-
-    // احفظه كـ FAQ (عشان ده غالبًا سؤال متكرر)
     await saveFAQ(redis, botId, text, quick);
-
     await sendText(senderId, quick, pageAccessToken);
     return;
   }
 
-  // 6) Gemini (للأسئلة اللي مش في البرومبت/مش واضحة)
+  // ✅ Gemini for everything else
   let replyText = null;
 
   if (model) {
     const prompt = buildPrompt({ brandName: catalog.brandName, text, session, catalog });
-
     try {
       const result = await model.generateContent(prompt);
       replyText = result?.response?.text?.() || null;
+      console.log("🧠 Gemini used:", activeModelName || "unknown");
     } catch (e) {
       console.error("⚠️ Gemini failed:", e?.message || e);
       replyText = null;
     }
+  } else {
+    console.warn("⚠️ Gemini model is null (disabled/unavailable).");
   }
 
-  // 7) fallback محترم لو Gemini وقع
   if (!replyText) {
-    replyText = `تمام 😊 قولي بس: عايز أنهي منتج (تيشيرت/هودي/قميص/بنطلون) + اللون اللي بتحبه؟`;
+    replyText = `تمام 😊 تحبني أساعدك تختار إيه بالظبط؟ (تيشيرت/هودي/قميص/بنطلون)`;
   }
 
-  // 8) update session
   session.history.push({ user: text, bot: replyText });
   await setSession(senderId, botId, session, redis);
 
-  // 9) save to FAQ لو السؤال متكرر غالبًا
-  if (isFAQishQuestion(text)) {
-    await saveFAQ(redis, botId, text, replyText);
-  }
+  if (isFAQishQuestion(text)) await saveFAQ(redis, botId, text, replyText);
 
-  // 10) send
   await sendText(senderId, replyText, pageAccessToken);
 }
