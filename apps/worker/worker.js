@@ -15,6 +15,43 @@ if (!PAGE_ACCESS_TOKEN) {
   console.warn("⚠️ PAGE_ACCESS_TOKEN missing");
 }
 
+// ================== Helpers ==================
+function extractMessage(jobData = {}) {
+  // jobData ممكن يبقى:
+  // 1) الشكل القديم: { senderId, text, mid, botId, pageAccessToken }
+  // 2) شكل الويبهوك: { event: { sender:{id}, message:{text, mid} } }
+  // 3) أحيانًا jobData نفسه = event
+
+  const event = jobData.event || jobData;
+
+  const senderId =
+    jobData.senderId ||
+    event?.sender?.id ||
+    null;
+
+  const text =
+    jobData.text ||
+    event?.message?.text ||
+    event?.text ||
+    null;
+
+  const mid =
+    jobData.mid ||
+    event?.message?.mid ||
+    event?.mid ||
+    null;
+
+  const botId =
+    jobData.botId ||
+    BOT_ID;
+
+  const pageAccessToken =
+    jobData.pageAccessToken ||
+    PAGE_ACCESS_TOKEN;
+
+  return { botId, senderId, text, mid, pageAccessToken, event };
+}
+
 // ================== Worker ==================
 // 👈 لازم يطابق اسم الكيو في queue.js
 const QUEUE_NAME = "messages";
@@ -27,29 +64,22 @@ const worker = new Worker(
   async (job) => {
     const data = job.data || {};
 
-    /**
-     * expected job.data:
-     * {
-     *   botId?: "clothes",
-     *   senderId: "PSID",
-     *   text: "رسالة العميل",
-     *   mid?: "m_xxx",
-     *   pageAccessToken?: "..."
-     * }
-     */
-
-    const botId = data.botId || BOT_ID;
-    const senderId = data.senderId;
-    const text = data.text;
-    const mid = data.mid || null;
-    const pageAccessToken = data.pageAccessToken || PAGE_ACCESS_TOKEN;
+    const { botId, senderId, text, mid, pageAccessToken, event } = extractMessage(data);
 
     if (!senderId || !text) {
-      console.log("⚠️ Job skipped (missing senderId/text)", data);
+      console.log("⚠️ Job skipped (missing senderId/text)", {
+        senderId,
+        text,
+        preview: {
+          hasEvent: Boolean(data?.event),
+          sender: event?.sender,
+          message: event?.message,
+          rawKeys: Object.keys(data || {}),
+        },
+      });
       return { skipped: true };
     }
 
-    // ✅ هنا بننادي salesReply
     await salesReply({
       botId,
       senderId,
@@ -63,7 +93,7 @@ const worker = new Worker(
   },
   {
     connection,
-    concurrency: 5, // عدلها براحتك
+    concurrency: 5,
   }
 );
 
