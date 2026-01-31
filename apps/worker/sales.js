@@ -2,13 +2,12 @@
 import dotenv from "dotenv";
 import axios from "axios";
 import crypto from "crypto";
-import { GoogleGenAI } from "@google/genai";
 
-import {
-  getSession as _getSession,
-  setSession as _setSession,
-  createDefaultSession
-} from "./session.js";
+// session helpers
+import { getSession as _getSession, setSession as _setSession, createDefaultSession } from "./session.js";
+
+// ✅ NEW SDK
+import { GoogleGenAI } from "@google/genai";
 
 dotenv.config();
 
@@ -23,34 +22,34 @@ const DEFAULT_CATALOG = {
       price: 299,
       sizes: ["M", "L", "XL", "2XL"],
       colors: ["أسود", "أبيض", "كحلي", "رمادي", "بيج"],
-      material: "قطن مريح (جودة كويسة للاستخدام اليومي)"
+      material: "قطن مريح (جودة كويسة للاستخدام اليومي)",
     },
     hoodie: {
       name: "هودي",
       price: 599,
       sizes: ["M", "L", "XL", "2XL"],
       colors: ["أسود", "رمادي", "كحلي", "أبيض", "بيج"],
-      material: "خامة دافية مناسبة للشتا (قماش تقيل نسبيًا)"
+      material: "خامة دافية مناسبة للشتا (قماش تقيل نسبيًا)",
     },
     shirt: {
       name: "قميص",
       price: 499,
       sizes: ["M", "L", "XL", "2XL"],
       colors: ["أسود", "أبيض", "كحلي", "رمادي", "بيج"],
-      material: "قماش عملي ومريح (ستايل كاجوال/سمارت)"
+      material: "قماش عملي ومريح (ستايل كاجوال/سمارت)",
     },
     pants: {
       name: "بنطلون",
       price: 549,
       sizes: ["M", "L", "XL", "2XL"],
       colors: ["أسود", "كحلي", "رمادي", "بيج", "زيتي"],
-      material: "خامة عملية مناسبة للخروج والشغل"
-    }
+      material: "خامة عملية مناسبة للخروج والشغل",
+    },
   },
   shipping: {
     cairoGiza: 70,
-    otherGovernorates: 90
-  }
+    otherGovernorates: 90,
+  },
 };
 
 /**
@@ -78,7 +77,7 @@ async function sendText(psid, text, token) {
       {
         recipient: { id: psid },
         messaging_type: "RESPONSE",
-        message: { text }
+        message: { text },
       },
       { params: { access_token: token } }
     );
@@ -110,14 +109,7 @@ function sha1(text) {
 
 function looksLikeGreeting(t) {
   const s = normalizeArabic(t);
-  return (
-    s.includes("السلام عليكم") ||
-    s.includes("سلام عليكم") ||
-    s === "سلام" ||
-    s.includes("اهلا") ||
-    s.includes("هاي") ||
-    s.includes("hi")
-  );
+  return s.includes("السلام عليكم") || s === "سلام" || s.includes("اهلا") || s.includes("هاي") || s.includes("hi");
 }
 
 function detectProduct(text) {
@@ -129,27 +121,26 @@ function detectProduct(text) {
   return null;
 }
 
-function extractSize(text) {
-  const m = /(^|\s)(2XL|XXL|XL|L|M|S)(\s|$)/i.exec(text);
-  return m?.[2] ? m[2].toUpperCase() : null;
-}
-
 function extractColor(text, catalog) {
   const s = normalizeArabic(text);
-  const all = [];
-  Object.values(catalog.categories).forEach((c) => c.colors.forEach((x) => all.push(x)));
-  for (const c of all) {
-    const cn = normalizeArabic(c);
-    if (cn && s.includes(cn)) return cn; // normalized
+  const allColors = new Set();
+  Object.values(catalog.categories).forEach((c) => c.colors.forEach((x) => allColors.add(normalizeArabic(x))));
+  for (const c of allColors) {
+    if (s.includes(c)) return c;
   }
+  return null;
+}
+
+function extractSize(text) {
+  const m = /(^|\s)(2XL|XXL|XL|L|M|S)(\s|$)/i.exec(text);
+  if (m?.[2]) return m[2].toUpperCase();
   return null;
 }
 
 function detectGovernorateBucket(text) {
   const s = normalizeArabic(text);
-  if (s.includes("القاهره") || s.includes("القاهرة") || s.includes("الجيزه") || s.includes("الجيزة")) return "cairoGiza";
-  if (s.includes("محافظ")) return "otherGovernorates";
-  return null;
+  if (s.includes("القاهره") || s.includes("الجيزه")) return "cairoGiza";
+  return "otherGovernorates";
 }
 
 function extractPhone(text) {
@@ -184,7 +175,7 @@ async function dedupCheck(redis, botId, mid) {
   if (!redis || !mid) return false;
   const key = `egboot:dedup:${botId}:${mid}`;
   try {
-    const res = await redis.set(key, "1", "NX", "EX", 90);
+    const res = await redis.set(key, "1", "NX", "EX", 60);
     return res !== "OK";
   } catch (e) {
     console.error("❌ dedup redis error:", e?.message || e);
@@ -199,6 +190,7 @@ async function getCachedFAQ(redis, botId, userText) {
   if (!redis) return null;
   const nq = normalizeArabic(userText);
   if (!nq) return null;
+
   const key = `egboot:faq:${botId}`;
   const field = sha1(nq);
 
@@ -227,40 +219,21 @@ async function saveFAQ(redis, botId, userText, answerText) {
 }
 
 /**
- * ================== Smart flow ==================
+ * ================== Smart Flow (stage/slots) ==================
  */
 function ensureSessionShape(session) {
   session.history = session.history || [];
   session.stage = session.stage || "ai";
   session.slots = session.slots || {
     product: null,
-    color: null,
+    color: null, // normalized
     size: null,
     cityBucket: null,
     customerName: null,
     phone: null,
-    address: null
+    address: null,
   };
   return session;
-}
-
-function fillSlotsFromText(session, text, catalog) {
-  const prod = detectProduct(text);
-  const colorNorm = extractColor(text, catalog);
-  const size = extractSize(text);
-  const city = detectGovernorateBucket(text);
-  const phone = extractPhone(text);
-
-  if (prod) session.slots.product = prod;
-  if (colorNorm) session.slots.color = colorNorm;
-  if (size) session.slots.size = size;
-  if (city) session.slots.cityBucket = city;
-  if (phone) session.slots.phone = phone;
-}
-
-function slotsReadyForCheckout(session) {
-  const { product, color, size } = session.slots;
-  return Boolean(product && color && size);
 }
 
 function formatColorForCatalog(normalizedColor, productKey, catalog) {
@@ -282,74 +255,39 @@ function checkoutSummary(session, catalog) {
     productName: p.name,
     price: p.price,
     colorLabel: formatColorForCatalog(color, product, catalog),
-    size
+    size,
   };
 }
 
-async function handleCheckout(session, text, catalog) {
-  const s = normalizeArabic(text);
-
-  // name
-  if (!session.slots.customerName) {
-    if (s.startsWith("اسمي") || (text.trim().length >= 3 && text.trim().length <= 30 && !extractPhone(text))) {
-      session.slots.customerName = text.trim().replace(/^اسمي\s*/i, "");
-    }
-  }
-
-  // address
-  if (!session.slots.address) {
-    if (s.includes("عنوان") || s.includes("شارع") || s.includes("عماره") || text.trim().length > 25) {
-      session.slots.address = text.trim();
-    }
-  }
-
-  // phone
-  const phone = extractPhone(text);
-  if (phone) session.slots.phone = phone;
-
-  const missing = [];
-  if (!session.slots.customerName) missing.push("الاسم");
-  if (!session.slots.phone) missing.push("رقم الموبايل");
-  if (!session.slots.address) missing.push("العنوان");
-
-  if (missing.length) {
-    return `تمام 😊 ابعتلي ${missing.join(" + ")} عشان أكدلك الأوردر.`;
-  }
-
-  const sum = checkoutSummary(session, catalog);
-  return `تمام ✅ أوردر: ${sum.productName} (${sum.colorLabel}) مقاس ${sum.size}\nالسعر ${sum.price} + شحن ${sum.shipping} = الإجمالي ${sum.total} جنيه.\nتأكيد؟ (نعم/لا) 😊`;
-}
-
-/**
- * ================== Gemini prompt (STRICT JSON) ==================
- */
 function buildGeminiPrompt({ catalog, session, userText }) {
   return `
-اكتب JSON فقط بدون أي كلام خارج JSON.
+أنت موظف مبيعات مصري شاطر وودود لمتجر ملابس اسمه "${catalog.brandName}".
 
-المطلوب:
-- reply: رد مصري لطيف (سطرين-3)
-- slots: استخرج لو تقدر:
-  product: tshirt|hoodie|shirt|pants|null
-  color: لون عربي من الموجود في الكتالوج أو null
-  size: M|L|XL|2XL|null
-  cityBucket: cairoGiza|otherGovernorates|null
+هدفك:
+1) ترد على رسالة العميل رد طبيعي ولطيف.
+2) تستخرج من كلام العميل إن أمكن:
+- product: (tshirt|hoodie|shirt|pants|null)
+- color: لون عربي موجود في الكتالوج أو null
+- size: (M|L|XL|2XL|null)
+- cityBucket: (cairoGiza|otherGovernorates|null) لو العميل ذكر محافظة/قاهرة/جيزة
 
-شكل JSON:
+مهم جدًا:
+- متكتبش غير JSON فقط (بدون أي نص خارجه).
+- JSON بالشكل ده بالظبط:
 {
   "reply": "string",
-  "slots": { "product": null, "color": null, "size": null, "cityBucket": null }
+  "slots": { "product": "...", "color": "...", "size": "...", "cityBucket": "..." }
 }
 
-الكتالوج:
+بيانات الكتالوج:
 ${JSON.stringify(catalog, null, 2)}
 
-آخر 6 رسائل:
+آخر سياق مختصر:
 ${JSON.stringify(session.history.slice(-6), null, 2)}
 
 رسالة العميل:
 "${userText}"
-`.trim();
+`;
 }
 
 function safeExtractJSON(text) {
@@ -366,8 +304,70 @@ function safeExtractJSON(text) {
   }
 }
 
+function fillSlotsFromText(session, text, catalog) {
+  const prod = detectProduct(text);
+  const colorNorm = extractColor(text, catalog);
+  const size = extractSize(text);
+
+  if (prod && !session.slots.product) session.slots.product = prod;
+  if (colorNorm && !session.slots.color) session.slots.color = colorNorm;
+  if (size && !session.slots.size) session.slots.size = size;
+
+  const s = normalizeArabic(text);
+  if ((s.includes("القاهره") || s.includes("الجيزه") || s.includes("محافظ")) && !session.slots.cityBucket) {
+    session.slots.cityBucket = detectGovernorateBucket(text);
+  }
+
+  const phone = extractPhone(text);
+  if (phone && !session.slots.phone) session.slots.phone = phone;
+}
+
+function slotsReadyForCheckout(session) {
+  const { product, color, size } = session.slots;
+  return Boolean(product && color && size);
+}
+
+function nextQuestionForSlots(session, catalog) {
+  const { product, color, size } = session.slots;
+
+  if (!product) return `تحب تشوف إيه من المتاح؟ (تيشيرت/هودي/قميص/بنطلون) 😊`;
+
+  const p = catalog.categories[product];
+  if (!color) return `تمام 😊 تحب أنهي لون في ${p.name}؟ المتاح: ${p.colors.join("، ")}`;
+  if (!size) return `جميل 😊 تحب أنهي مقاس؟ المتاح: ${p.sizes.join(" / ")}`;
+
+  return null;
+}
+
+async function handleCheckout(session, text, catalog) {
+  const s = normalizeArabic(text);
+
+  if (!session.slots.customerName && (s.includes("اسمي") || s.includes("انا") || text.trim().length <= 25)) {
+    if (text.trim().length >= 3 && text.trim().length <= 30) session.slots.customerName = text.trim();
+  }
+
+  if (!session.slots.address && (s.includes("عنوان") || s.includes("شارع") || s.includes("ميدان") || text.trim().length > 25)) {
+    session.slots.address = text.trim();
+  }
+
+  const phone = extractPhone(text);
+  if (phone && !session.slots.phone) session.slots.phone = phone;
+
+  const missing = [];
+  if (!session.slots.customerName) missing.push("الاسم");
+  if (!session.slots.phone) missing.push("رقم الموبايل");
+  if (!session.slots.address) missing.push("العنوان");
+
+  if (missing.length) {
+    return `تمام 😊 ابعتلي ${missing.join(" + ")} عشان أكدلك الأوردر.`;
+  }
+
+  const sum = checkoutSummary(session, catalog);
+  return `تمام ✅ أوردر: ${sum.productName} (${sum.colorLabel}) مقاس ${sum.size}\nالسعر ${sum.price} + شحن ${sum.shipping} = الإجمالي ${sum.total} جنيه.\nتأكيد؟ (نعم/لا) 😊`;
+}
+
 /**
- * ================== Main ==================
+ * ================== Main Entry ==================
  */
 export async function salesReply({ botId = "clothes", senderId, text, pageAccessToken, redis, mid }) {
   if (!senderId || !text?.trim()) return;
@@ -380,7 +380,7 @@ export async function salesReply({ botId = "clothes", senderId, text, pageAccess
   let session = ensureSessionShape((await getSession(senderId, botId, redis)) || createDefaultSession());
   fillSlotsFromText(session, text, catalog);
 
-  // FAQ first (اختياري)
+  // ✅ FAQ first
   const cached = await getCachedFAQ(redis, botId, text);
   if (cached) {
     session.history.push({ user: text, bot: cached });
@@ -389,9 +389,9 @@ export async function salesReply({ botId = "clothes", senderId, text, pageAccess
     return;
   }
 
-  // greeting
+  // ✅ greeting
   if (looksLikeGreeting(text)) {
-    const reply = `وعليكم السلام 😊 أهلًا بيك في ${catalog.brandName} 👋 تحب تشوف إيه النهارده؟`;
+    const reply = `وعليكم السلام 😊 أهلًا بيك في ${catalog.brandName} 👋 تحب تدور على إيه النهارده؟`;
     session.history.push({ user: text, bot: reply });
     await setSession(senderId, botId, session, redis);
     await sendText(senderId, reply, pageAccessToken);
@@ -399,10 +399,10 @@ export async function salesReply({ botId = "clothes", senderId, text, pageAccess
     return;
   }
 
-  // once slots complete -> checkout stage
+  // ✅ once slots complete → checkout
   if (slotsReadyForCheckout(session)) session.stage = "checkout";
 
-  // checkout stage
+  // ✅ checkout stage
   if (session.stage === "checkout") {
     const reply = await handleCheckout(session, text, catalog);
     session.history.push({ user: text, bot: reply });
@@ -412,15 +412,24 @@ export async function salesReply({ botId = "clothes", senderId, text, pageAccess
     return;
   }
 
-  // AI stage (Gemini handles the “deal”)
+  // ✅ AI stage
+  const slotQuestion = nextQuestionForSlots(session, catalog);
+
   let replyText = null;
 
   if (ai) {
     try {
       const prompt = buildGeminiPrompt({ catalog, session, userText: text });
+
+      // ✅✅✅ FIX: contents MUST be array with role + parts
       const resp = await ai.models.generateContent({
         model: GEMINI_MODEL,
-        contents: prompt
+        contents: [
+          {
+            role: "user",
+            parts: [{ text: prompt }],
+          },
+        ],
       });
 
       const raw = resp?.text || "";
@@ -429,36 +438,33 @@ export async function salesReply({ botId = "clothes", senderId, text, pageAccess
       if (parsed?.reply) replyText = parsed.reply;
 
       const gs = parsed?.slots || {};
-      if (gs.product) session.slots.product = gs.product;
-      if (gs.color) session.slots.color = normalizeArabic(gs.color);
-      if (gs.size) session.slots.size = String(gs.size).toUpperCase();
-      if (gs.cityBucket) session.slots.cityBucket = gs.cityBucket;
+      if (gs.product && !session.slots.product) session.slots.product = gs.product;
+      if (gs.color && !session.slots.color) session.slots.color = normalizeArabic(gs.color);
+      if (gs.size && !session.slots.size) session.slots.size = String(gs.size).toUpperCase();
+      if (gs.cityBucket && !session.slots.cityBucket) session.slots.cityBucket = gs.cityBucket;
 
       if (slotsReadyForCheckout(session)) {
         session.stage = "checkout";
         const sum = checkoutSummary(session, catalog);
         replyText =
           replyText ||
-          `تمام ✅ اخترنا ${sum.productName} (${sum.colorLabel}) مقاس ${sum.size}. ابعتلي الاسم + رقم الموبايل + العنوان عشان أكد الأوردر 😊`;
+          `تمام ✅ اخترت ${sum.productName} (${sum.colorLabel}) مقاس ${sum.size}. ابعتلي الاسم + رقم الموبايل + العنوان عشان أكد الأوردر 😊`;
       }
     } catch (e) {
       console.error("⚠️ Gemini failed:", e?.message || e);
       replyText = null;
     }
+  } else {
+    console.warn("⚠️ Gemini disabled (missing GEMINI_API_KEY).");
   }
 
   if (!replyText) {
-    // fallback ذكي: سؤال واحد حسب الناقص
-    const p = session.slots.product ? catalog.categories[session.slots.product] : null;
-
-    if (!session.slots.product) replyText = `تحب تشوف إيه من المتاح؟ (تيشيرت/هودي/قميص/بنطلون) 😊`;
-    else if (!session.slots.color) replyText = `تمام 😊 تحب أنهي لون في ${p.name}؟ المتاح: ${p.colors.join("، ")}`;
-    else if (!session.slots.size) replyText = `جميل 😊 تحب أنهي مقاس؟ المتاح: ${p.sizes.join(" / ")}`;
-    else replyText = `تمام 😊`;
+    replyText = slotQuestion || `تمام 😊 قولي تحب تيشيرت ولا هودي ولا قميص ولا بنطلون؟`;
   }
 
   session.history.push({ user: text, bot: replyText });
   await setSession(senderId, botId, session, redis);
   await sendText(senderId, replyText, pageAccessToken);
+
   await saveFAQ(redis, botId, text, replyText);
 }
