@@ -2,7 +2,6 @@
 import dotenv from "dotenv";
 import { Worker } from "bullmq";
 import IORedis from "ioredis";
-
 import { salesReply } from "./sales.js";
 
 dotenv.config();
@@ -31,7 +30,8 @@ connection.on("error", (e) => console.error("❌ Redis error:", e?.message || e)
 connection.on("close", () => console.log("⚠️ Redis connection closed"));
 connection.on("reconnecting", () => console.log("🟠 Redis reconnecting..."));
 
-const PAGE_BOT_PREFIX = "egboot:pagebot:"; // egboot:pagebot:<pageId> => botId
+// SaaS mapping: egboot:pagebot:<pageId> => botId
+const PAGE_BOT_PREFIX = "egboot:pagebot:";
 
 async function resolveBotId(jobData, event) {
   if (jobData?.botId) return jobData.botId;
@@ -48,18 +48,19 @@ async function resolveBotId(jobData, event) {
   }
 }
 
-function isEcho(event) {
-  return Boolean(event?.message?.is_echo);
-}
-
 function extractText(event) {
   return event?.message?.text || "";
+}
+
+function isEcho(event) {
+  return Boolean(event?.message?.is_echo);
 }
 
 function extractMid(event) {
   return event?.message?.mid || null;
 }
 
+// Queue name MUST match webhook: "messages"
 const worker = new Worker(
   "messages",
   async (job) => {
@@ -69,18 +70,24 @@ const worker = new Worker(
       return { ok: false, reason: "missing event" };
     }
 
-    if (isEcho(event)) return { ok: true, skipped: "echo" };
+    // never reply to echoes
+    if (isEcho(event)) {
+      return { ok: true, skipped: "echo" };
+    }
 
     const senderId = event?.sender?.id;
     const text = extractText(event);
     const mid = extractMid(event);
 
-    // تجاهل أي رسالة مش نص دلوقتي
+    // non-text -> skip for now
     if (!senderId || !text?.trim()) {
       return { ok: true, skipped: "no-text" };
     }
 
-    const botId = (await resolveBotId(job?.data, event)) || "clothes";
+    const botId = await resolveBotId(job?.data, event);
+    if (!botId) {
+      console.warn("⚠️ botId missing, using default: clothes");
+    }
 
     const pageAccessToken = process.env.PAGE_ACCESS_TOKEN || "";
     if (!pageAccessToken) {
@@ -88,7 +95,7 @@ const worker = new Worker(
     }
 
     await salesReply({
-      botId,
+      botId: botId || "clothes",
       senderId,
       text,
       mid,
