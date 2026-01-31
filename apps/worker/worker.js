@@ -1,101 +1,164 @@
-// apps/worker/session.js
+// apps/worker/worker.js
+
 import dotenv from "dotenv";
-import Redis from "ioredis";
+import { Worker } from "bullmq";
+import IORedis from "ioredis";
+import { salesReply } from "./sales.js";
 
 dotenv.config();
 
-const REDIS_URL = process.env.REDIS_URL || process.env.REDIS_PUBLIC_URL || "";
-
+// ================== Redis ==================
+const REDIS_URL = process.env.REDIS_URL || process.env.REDIS_PUBLIC_URL;
 if (!REDIS_URL) {
-  console.warn("⚠️ REDIS_URL missing. Sessions will be in-memory only.");
+  console.error("❌ Missing REDIS_URL in environment variables");
+  process.exit(1);
 }
 
-const redis = REDIS_URL
-  ? new Redis(REDIS_URL, {
-      enableReadyCheck: false,
-      maxRetriesPerRequest: 1,
-      retryStrategy(times) {
-        if (times > 10) return null;
-        return Math.min(times * 500, 5000);
-      },
-    })
-  : null;
+console.log("🟡 Worker booting...");
 
-const KEY_PREFIX = "egboot:session:";
+const redis = new IORedis(REDIS_URL, {
+  maxRetriesPerRequest: null,
+  enableReadyCheck: false,
+  retryStrategy(times) {
+    return Math.min(times * 300, 3000);
+  },
+});
 
-// fallback in-memory
-const mem = new Map();
+redis.on("connect", () => console.log("🔌 Redis connected"));
+redis.on("ready", () => console.log("✅ Redis ready"));
+redis.on("error", (e) => console.error("❌ Redis error:", e?.message || e));
+redis.on("reconnecting", () => console.log("🟠 Redis reconnecting"));
+redis.on("close", () => console.log("⚠️ Redis connection closed"));
 
-export function createDefaultSession() {
-  return {
-    step: "idle",
-    order: {
-      category: null,
-      product: null,
-      size: null,
-      color: null,
-      phone: null,
-      address: null,
-      governorate: null,
-    },
-    history: [],
-    firstMessageSeen: false,
-    updatedAt: Date.now(),
-  };
-}
+// ================== SaaS helpers ==================
+const PAGE_BOT_PREFIX = "egboot:pagebot:"; 
+// egboot:pagebot:<pageId> => botId
 
-function key(botId, psid) {
-  return `${KEY_PREFIX}${botId}:${psid}`;
-}
+async function resolveBotId(jobData, event) {
+  if (jobData?.botId) return jobData.botId;
 
-export async function getSession(botId, psid) {
-  if (!psid) return null;
-  const k = key(botId || "clothes", psid);
-
-  if (!redis) return mem.get(k) || null;
+  const pageId = event?.recipient?.id;
+  if (!pageId) return null;
 
   try {
-    const raw = await redis.get(k);
-    return raw ? JSON.parse(raw) : null;
+    return await redis.get(PAGE_BOT_PREFIX + pageId);
   } catch (e) {
-    console.error("❌ getSession error:", e?.message || e);
+    console.error("❌ resolveBotId error:", e?.message || e);
     return null;
   }
 }
 
-export async function setSession(botId, psid, session) {
-  if (!psid) return;
+function extractText(event) {
+  return (
+    event?.message?.text ||
+    event?.postback?.payload ||
+    event?.postback?.title ||
+    ""
+  );
+}
 
-  const s = session || createDefaultSession();
-  s.updatedAt = Date.now();
+function isEcho(event) {
+  return Boolean(event?.message?.is_echo);
+}
 
-  const k = key(botId || "clothes", psid);
+// ================== Worker ==================
+const worker = new Worker(
+  "messages",
+  async (job) => {
+    const event = job?.data?.event;
+    if (!event) {
+      console.warn("⚠️ Job missing event");
+      return { ok: false };
+    }
 
-  if (!redis) {
-    mem.set(k, s);
-    return;
+    // تجاهل echo
+    if (isEcho(event)) {
+      return { ok: true, skipped: "echo" };
+    }
+
+    const senderId = event?.sender?.id;
+    const text = extractText(event).trim();
+
+    // تجاهل أي رسالة فاضية أو غير نصية
+    if (!senderId || !text) {
+      return { ok: true, skipped: "no-text" };
+    }
+
+    // botId (SaaS)
+    let botId = await resolveBotId(job.data, event);
+    if (!botId) {
+      botId = "clothes"; // default مؤقت
+      console.warn("⚠️ botId missing, using default:", botId);
+    }
+
+    const pageAccessToken = process.env.PAGE_ACCESS_TOKEN || "";
+    if (!pageAccessToken) {
+      console.warn("⚠️ PAGE_ACCESS_TOKEN missing");
+    }
+
+    await salesReply({
+      botId,
+      senderId,
+      text,
+      pageAccessToken,
+      redis,
+    });
+
+    return { ok: true };
+  },
+  {
+    connection: redis,
+    concurrency: Number(process.env.WORKER_CONCURRENCY || 3),
+  }
+);
+
+// ================== Events ==================
+worker.on("ready", () => console.log("🟢 Worker ready"));
+worker.on("completed", (job) =>
+  console.log("🎉 Job completed:", job.id)
+);
+worker.on("failed", (job, err) =>
+  console.error("❌ Job failed:", job?.id, err?.message || err)
+);
+worker.on("stalled", (jobId) =>
+  console.warn("⏳ Job stalled:", jobId)
+);
+worker.on("error", (err) =>
+  console.error("🔥 Worker error:", err?.message || err)
+);
+
+// ================== Graceful shutdown ==================
+let shuttingDown = false;
+
+async function shutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+
+  console.log(`🛑 ${signal} received, shutting down worker...`);
+
+  try {
+    await worker.close();
+  } catch (e) {
+    console.error("⚠️ Worker close error:", e?.message || e);
   }
 
   try {
-    // TTL = 24h
-    await redis.set(k, JSON.stringify(s), "EX", 60 * 60 * 24);
+    await redis.quit();
   } catch (e) {
-    console.error("❌ setSession error:", e?.message || e);
+    console.error("⚠️ Redis quit error:", e?.message || e);
   }
+
+  console.log("✅ Worker stopped");
+  process.exit(0);
 }
 
-export async function clearSession(botId, psid) {
-  if (!psid) return;
-  const k = key(botId || "clothes", psid);
-
-  if (!redis) {
-    mem.delete(k);
-    return;
-  }
-
-  try {
-    await redis.del(k);
-  } catch (e) {
-    console.error("❌ clearSession error:", e?.message || e);
-  }
-}
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+process.on("SIGINT", () => shutdown("SIGINT"));
+process.on("uncaughtException", (err) => {
+  console.error("💥 uncaughtException:", err);
+  shutdown("uncaughtException");
+});
+process.on("unhandledRejection", (reason) => {
+  console.error("💥 unhandledRejection:", reason);
+  shutdown("unhandledRejection");
+});
