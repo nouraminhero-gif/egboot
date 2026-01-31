@@ -6,10 +6,14 @@ dotenv.config();
 
 const REDIS_URL = process.env.REDIS_URL || process.env.REDIS_PUBLIC_URL || "";
 
+if (!REDIS_URL) {
+  console.warn("⚠️ REDIS_URL missing. Sessions will be in-memory only.");
+}
+
 const redis = REDIS_URL
   ? new Redis(REDIS_URL, {
       enableReadyCheck: false,
-      maxRetriesPerRequest: null,
+      maxRetriesPerRequest: 1,
       retryStrategy(times) {
         if (times > 10) return null;
         return Math.min(times * 500, 5000);
@@ -17,37 +21,35 @@ const redis = REDIS_URL
     })
   : null;
 
-if (!REDIS_URL) {
-  console.warn("⚠️ REDIS_URL missing. Sessions will be disabled.");
-}
+// ✅ bot-aware prefix
+const KEY_PREFIX = "egboot:session:";
 
-const PREFIX = "egboot:session:";
+// fallback in-memory
+const mem = new Map();
 
 export function createDefaultSession() {
   return {
+    greeted: false, // ✅ مهم عشان نمنع “البوت يبدأ”
     step: "idle",
+    order: { product: null, size: null, color: null, phone: null, address: null },
     history: [],
-    order: {
-      product: null,
-      size: null,
-      color: null,
-      phone: null,
-      address: null,
-    },
     updatedAt: Date.now(),
   };
 }
 
-function makeKey(pageId, psid) {
-  return `${PREFIX}${pageId || "nopage"}:${psid}`;
+function key(botId, psid) {
+  return `${KEY_PREFIX}${botId}:${psid}`;
 }
 
-export async function getSession(pageId, psid) {
-  if (!psid) return null;
-  if (!redis) return null;
+export async function getSession(botId, psid) {
+  if (!botId || !psid) return null;
+
+  const k = key(botId, psid);
+
+  if (!redis) return mem.get(k) || null;
 
   try {
-    const raw = await redis.get(makeKey(pageId, psid));
+    const raw = await redis.get(k);
     return raw ? JSON.parse(raw) : null;
   } catch (e) {
     console.error("❌ getSession error:", e?.message || e);
@@ -55,28 +57,37 @@ export async function getSession(pageId, psid) {
   }
 }
 
-export async function setSession(pageId, psid, session) {
-  if (!psid) return;
-  if (!redis) return;
+export async function setSession(botId, psid, session) {
+  if (!botId || !psid) return;
 
+  const k = key(botId, psid);
   const s = session || createDefaultSession();
   s.updatedAt = Date.now();
-  s.history = Array.isArray(s.history) ? s.history : [];
+
+  if (!redis) {
+    mem.set(k, s);
+    return;
+  }
 
   try {
-    // TTL = 24h
-    await redis.set(makeKey(pageId, psid), JSON.stringify(s), "EX", 60 * 60 * 24);
+    await redis.set(k, JSON.stringify(s), "EX", 60 * 60 * 24); // 24h
   } catch (e) {
     console.error("❌ setSession error:", e?.message || e);
   }
 }
 
-export async function clearSession(pageId, psid) {
-  if (!psid) return;
-  if (!redis) return;
+export async function clearSession(botId, psid) {
+  if (!botId || !psid) return;
+
+  const k = key(botId, psid);
+
+  if (!redis) {
+    mem.delete(k);
+    return;
+  }
 
   try {
-    await redis.del(makeKey(pageId, psid));
+    await redis.del(k);
   } catch (e) {
     console.error("❌ clearSession error:", e?.message || e);
   }
