@@ -2,66 +2,45 @@
 import dotenv from "dotenv";
 import axios from "axios";
 import crypto from "crypto";
-import { GoogleGenAI } from "@google/genai";
 
-import {
-  getSession as _getSession,
-  setSession as _setSession,
-  createDefaultSession,
-} from "./session.js";
+import { getSession as _getSession, setSession as _setSession, createDefaultSession } from "./session.js";
+
+// ✅ Using installed package in your package.json:
+import { GoogleGenerativeAI } from "@google/generative-ai";
 
 dotenv.config();
 
 /**
- * ================== Catalog (context only) ==================
+ * ================== Catalog / Business Context ==================
  */
 const DEFAULT_CATALOG = {
   brandName: "Nour Fashion",
   categories: {
-    tshirt: {
-      name: "تيشيرت",
-      price: 299,
-      sizes: ["M", "L", "XL", "2XL"],
-      colors: ["أسود", "أبيض", "كحلي", "رمادي", "بيج"],
-    },
-    hoodie: {
-      name: "هودي",
-      price: 599,
-      sizes: ["M", "L", "XL", "2XL"],
-      colors: ["أسود", "رمادي", "كحلي", "أبيض", "بيج"],
-    },
-    shirt: {
-      name: "قميص",
-      price: 499,
-      sizes: ["M", "L", "XL", "2XL"],
-      colors: ["أسود", "أبيض", "كحلي", "رمادي", "بيج"],
-    },
-    pants: {
-      name: "بنطلون",
-      price: 549,
-      sizes: ["M", "L", "XL", "2XL"],
-      colors: ["أسود", "كحلي", "رمادي", "بيج", "زيتي"],
-    },
+    tshirt: { name: "تيشيرت", price: 299, sizes: ["M","L","XL","2XL"], colors: ["أسود","أبيض","كحلي","رمادي","بيج"] },
+    hoodie: { name: "هودي", price: 599, sizes: ["M","L","XL","2XL"], colors: ["أسود","رمادي","كحلي","أبيض","بيج"] },
+    shirt:  { name: "قميص",  price: 499, sizes: ["M","L","XL","2XL"], colors: ["أسود","أبيض","كحلي","رمادي","بيج"] },
+    pants:  { name: "بنطلون", price: 549, sizes: ["M","L","XL","2XL"], colors: ["أسود","كحلي","رمادي","بيج","زيتي"] },
   },
   shipping: { cairoGiza: 70, otherGovernorates: 90 },
+  policies: {
+    tone: "مصري ودود وسريع",
+    goal: "بيع + مساعدة العميل يختار + إغلاق الأوردر بسلاسة",
+  }
 };
 
 /**
  * ================== Gemini Setup ==================
  */
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
-const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
+const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.0-flash";
 
-// لو حبيت توقف Gemini من غير ما تمسح keys:
-// حط GEMINI_DISABLED=1 في env
-const GEMINI_DISABLED = String(process.env.GEMINI_DISABLED || "0") === "1";
-
-let ai = null;
-if (GEMINI_API_KEY && !GEMINI_DISABLED) {
-  ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
-  console.log(`🤖 Gemini client ready (model: ${GEMINI_MODEL})`);
+let model = null;
+if (GEMINI_API_KEY) {
+  const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
+  model = genAI.getGenerativeModel({ model: GEMINI_MODEL });
+  console.log(`🤖 Gemini ready (model: ${GEMINI_MODEL})`);
 } else {
-  console.warn("⚠️ Gemini disabled (missing key or GEMINI_DISABLED=1).");
+  console.warn("⚠️ GEMINI_API_KEY missing. Gemini disabled.");
 }
 
 /**
@@ -105,80 +84,127 @@ function sha1(text) {
   return crypto.createHash("sha1").update(text).digest("hex");
 }
 
-function tokenize(text) {
-  const s = normalizeArabic(text);
-  if (!s) return [];
-  // شيل الكلمات القصيرة جدًا
-  return s.split(" ").filter((w) => w.length >= 2);
-}
-
-function safeExtractJSON(text) {
-  if (!text) return null;
-  const s = String(text).trim();
-  const first = s.indexOf("{");
-  const last = s.lastIndexOf("}");
-  if (first === -1 || last === -1 || last <= first) return null;
-  try {
-    return JSON.parse(s.slice(first, last + 1));
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Similarity: Dice coefficient on word bigrams (بسيطة وسريعة)
- */
-function bigramsWords(words) {
-  const bg = [];
-  for (let i = 0; i < words.length - 1; i++) bg.push(words[i] + "_" + words[i + 1]);
-  return bg;
-}
-
-function diceSimilarity(aText, bText) {
-  const a = tokenize(aText);
-  const b = tokenize(bText);
-  if (!a.length || !b.length) return 0;
-
-  const A = bigramsWords(a);
-  const B = bigramsWords(b);
-  if (!A.length || !B.length) return 0;
-
-  const setA = new Map();
-  for (const x of A) setA.set(x, (setA.get(x) || 0) + 1);
-
-  let intersect = 0;
-  for (const y of B) {
-    const c = setA.get(y) || 0;
-    if (c > 0) {
-      intersect += 1;
-      setA.set(y, c - 1);
-    }
-  }
-
-  return (2 * intersect) / (A.length + B.length);
-}
-
 /**
  * ================== Session wrappers ==================
  */
 async function getSession(senderId, botId, redis) {
+  try { return await _getSession(senderId, botId, redis); }
+  catch { return await _getSession(senderId); }
+}
+async function setSession(senderId, botId, session, redis) {
+  try { return await _setSession(senderId, botId, session, redis); }
+  catch { return await _setSession(senderId, session); }
+}
+
+function ensureSessionShape(session) {
+  session.history = session.history || []; // [{user, gemini}]
+  session.profile = session.profile || { notes: "" };
+  return session;
+}
+
+/**
+ * ================== BOT "Brain" (Learning) ==================
+ * We store:
+ * - FAQ: normalized question hash -> Gemini answer
+ * - Conversation log: last N turns
+ * - Slots/Meta extraction (optional lightweight)
+ */
+
+// Save FAQ (Q -> A)
+async function saveFAQ(redis, botId, userText, answerText) {
+  if (!redis) return;
+  const nq = normalizeArabic(userText);
+  if (!nq) return;
+  const key = `egboot:faq:${botId}`;
+  const field = sha1(nq);
   try {
-    return await _getSession(senderId, botId, redis);
-  } catch {
-    return await _getSession(senderId);
+    await redis.hset(key, field, answerText);
+    await redis.expire(key, 60 * 60 * 24 * 90); // 90 days
+  } catch (e) {
+    console.error("❌ FAQ hset error:", e?.message || e);
   }
 }
 
-async function setSession(senderId, botId, session, redis) {
+// Get exact cached FAQ (only exact normalized hash)
+async function getCachedFAQ(redis, botId, userText) {
+  if (!redis) return null;
+  const nq = normalizeArabic(userText);
+  if (!nq) return null;
+  const key = `egboot:faq:${botId}`;
+  const field = sha1(nq);
   try {
-    return await _setSession(senderId, botId, session, redis);
-  } catch {
-    return await _setSession(senderId, session);
+    return (await redis.hget(key, field)) || null;
+  } catch (e) {
+    console.error("❌ FAQ hget error:", e?.message || e);
+    return null;
+  }
+}
+
+// Store conversation turns (for dynamic context)
+async function pushConversation(redis, botId, senderId, turn) {
+  if (!redis) return;
+  const key = `egboot:conv:${botId}:${senderId}`;
+  try {
+    await redis.lpush(key, JSON.stringify(turn));
+    await redis.ltrim(key, 0, 30); // keep last 30 turns
+    await redis.expire(key, 60 * 60 * 24 * 30);
+  } catch (e) {
+    console.error("❌ conv lpush error:", e?.message || e);
+  }
+}
+
+async function getRecentConversation(redis, botId, senderId, n = 8) {
+  if (!redis) return [];
+  const key = `egboot:conv:${botId}:${senderId}`;
+  try {
+    const items = await redis.lrange(key, 0, Math.max(0, n - 1));
+    return items.map((x) => {
+      try { return JSON.parse(x); } catch { return null; }
+    }).filter(Boolean);
+  } catch (e) {
+    console.error("❌ conv lrange error:", e?.message || e);
+    return [];
   }
 }
 
 /**
- * ================== Dedup (avoid repeated replies) ==================
+ * ================== Build Gemini Prompt ==================
+ * Gemini replies naturally (ONLY message sent to customer).
+ * Bot adds context:
+ * - business info (catalog/shipping)
+ * - last conversation turns
+ * - (optional) exact FAQ hit
+ */
+function buildGeminiPrompt({ catalog, recentTurns, userText, faqHit }) {
+  const system = `
+أنت موظف مبيعات مصري شاطر وودود لمتجر ملابس اسمه "${catalog.brandName}".
+ممنوع تسأل أسئلة كتير في نفس الرسالة. اسأل سؤال واحد واضح فقط لو محتاج.
+لو العميل بيسأل عن الشحن/السعر/الألوان/المقاسات: رد بدقة من الداتا.
+لو العميل عايز يطلب: وجّهه خطوة بخطوة بسلاسة (اسم/موبايل/عنوان/تأكيد).
+خليك طبيعي مش روبوت.
+`;
+
+  const business = `
+بيانات المتجر (مصدر الحقيقة):
+${JSON.stringify(catalog, null, 2)}
+`;
+
+  const memory = `
+آخر محادثات مع العميل (مختصر):
+${JSON.stringify(recentTurns.slice(0, 8), null, 2)}
+`;
+
+  const faq = faqHit
+    ? `\nمعلومة متعلمة سابقًا (FAQ مطابق للسؤال):\n${faqHit}\n`
+    : "";
+
+  const user = `رسالة العميل الآن:\n"${userText}"`;
+
+  return `${system}\n${business}\n${memory}\n${faq}\n${user}`;
+}
+
+/**
+ * ================== Dedup ==================
  */
 async function dedupCheck(redis, botId, mid) {
   if (!redis || !mid) return false;
@@ -193,181 +219,9 @@ async function dedupCheck(redis, botId, mid) {
 }
 
 /**
- * ================== Knowledge Base (VERY IMPORTANT) ==================
- * 1) FAQ Hash:     egboot:kb:<botId>           field=sha1(qNorm) value=JSON
- * 2) Text Hash:    egboot:kb_text:<botId>      field=qNorm       value=sha1(qNorm)
- * 3) Index Sets:   egboot:kb_idx:<botId>:<tok> => Set of field hashes
- *
- * ليه؟ عشان البحث يبقى سريع ونحافظ على الداتا
+ * ================== Main (Gemini-only Reply) ==================
  */
-async function kbSave(redis, botId, userText, replyText, tags) {
-  if (!redis) return;
-
-  const qNorm = normalizeArabic(userText);
-  if (!qNorm) return;
-
-  const field = sha1(qNorm);
-
-  const kbKey = `egboot:kb:${botId}`;
-  const kbTextKey = `egboot:kb_text:${botId}`;
-
-  const payload = {
-    q: userText,
-    qNorm,
-    a: replyText,
-    tags: tags || {},
-    ts: Date.now(),
-    hits: 0,
-  };
-
-  try {
-    // حفظ الإجابة (من أول مرة)
-    await redis.hset(kbKey, field, JSON.stringify(payload));
-
-    // خريطة النص -> field (للـ exact match السريع)
-    await redis.hset(kbTextKey, qNorm, field);
-
-    // بناء index بالكلمات
-    const toks = tokenize(qNorm);
-    for (const t of toks) {
-      const idxKey = `egboot:kb_idx:${botId}:${t}`;
-      await redis.sadd(idxKey, field);
-      // نخلي الـ index يعيش شهرين مثلًا
-      await redis.expire(idxKey, 60 * 60 * 24 * 60);
-    }
-
-    // TTL للـ KB نفسه (اختياري)
-    await redis.expire(kbKey, 60 * 60 * 24 * 90);
-    await redis.expire(kbTextKey, 60 * 60 * 24 * 90);
-  } catch (e) {
-    console.error("❌ kbSave redis error:", e?.message || e);
-  }
-}
-
-async function kbGetExact(redis, botId, userText) {
-  if (!redis) return null;
-  const qNorm = normalizeArabic(userText);
-  if (!qNorm) return null;
-
-  const kbKey = `egboot:kb:${botId}`;
-  const kbTextKey = `egboot:kb_text:${botId}`;
-
-  try {
-    const field = await redis.hget(kbTextKey, qNorm);
-    if (!field) return null;
-
-    const raw = await redis.hget(kbKey, field);
-    if (!raw) return null;
-
-    const data = JSON.parse(raw);
-    return { field, data };
-  } catch {
-    return null;
-  }
-}
-
-async function kbRetrieve(redis, botId, userText) {
-  if (!redis) return null;
-
-  // 1) exact
-  const exact = await kbGetExact(redis, botId, userText);
-  if (exact?.data?.a) return { answer: exact.data.a, score: 1.0 };
-
-  // 2) indexed candidates
-  const qNorm = normalizeArabic(userText);
-  const toks = tokenize(qNorm);
-  if (!toks.length) return null;
-
-  // اجمع مرشحين من أول 5 كلمات (كفاية)
-  const topToks = toks.slice(0, 5);
-  const keys = topToks.map((t) => `egboot:kb_idx:${botId}:${t}`);
-
-  let candidateFields = [];
-  try {
-    // SUNION
-    const union = await redis.sunion(keys);
-    candidateFields = union || [];
-  } catch (e) {
-    console.error("❌ kbRetrieve sunion error:", e?.message || e);
-    return null;
-  }
-
-  if (!candidateFields.length) return null;
-
-  // اسحب بيانات المرشحين (حد أقصى 30)
-  const kbKey = `egboot:kb:${botId}`;
-  const sample = candidateFields.slice(0, 30);
-
-  let best = { score: 0, answer: null };
-
-  try {
-    const raws = await redis.hmget(kbKey, ...sample);
-    for (const raw of raws) {
-      if (!raw) continue;
-      const data = JSON.parse(raw);
-      const score = diceSimilarity(qNorm, data.qNorm);
-      if (score > best.score) {
-        best.score = score;
-        best.answer = data.a;
-      }
-    }
-  } catch (e) {
-    console.error("❌ kbRetrieve hmget error:", e?.message || e);
-    return null;
-  }
-
-  // threshold: لو أقل من 0.45 غالبًا مش قريب
-  if (best.answer && best.score >= 0.45) {
-    return { answer: best.answer, score: best.score };
-  }
-
-  return null;
-}
-
-/**
- * ================== Gemini Prompt (STRICT JSON) ==================
- * Gemini بيرد + يطلع tags (intent/product) عشان KB تبقى “منظمة”
- */
-function buildGeminiPrompt({ catalog, history, userText }) {
-  return `
-أنت موظف مبيعات مصري شاطر وودود لمتجر ملابس اسمه "${catalog.brandName}".
-ردّ على رسالة العميل رد طبيعي مختصر (سطرين-3) وبإيموجي خفيفة 😊.
-
-مهم جدًا:
-- اكتب JSON فقط بدون أي كلام خارج JSON.
-- الشكل الإجباري:
-{
-  "reply": "string",
-  "tags": {
-    "intent": "ask_shipping|ask_price|ask_sizes|ask_colors|ask_available|smalltalk|order_interest|other",
-    "product": "tshirt|hoodie|shirt|pants|null"
-  }
-}
-
-بيانات المتجر:
-${JSON.stringify(catalog, null, 2)}
-
-آخر 6 رسائل (سياق):
-${JSON.stringify(history.slice(-6), null, 2)}
-
-رسالة العميل:
-"${userText}"
-`;
-}
-
-/**
- * ================== Main Entry ==================
- * - Gemini ON: يرد + نسجل من أول مرة
- * - Gemini OFF: نرد من KB (retrieval) كأنه Gemini
- */
-export async function salesReply({
-  botId = "clothes",
-  senderId,
-  text,
-  pageAccessToken,
-  redis,
-  mid,
-}) {
+export async function salesReply({ botId = "clothes", senderId, text, pageAccessToken, redis, mid }) {
   if (!senderId || !text?.trim()) return;
 
   const already = await dedupCheck(redis, botId, mid);
@@ -375,65 +229,41 @@ export async function salesReply({
 
   const catalog = DEFAULT_CATALOG;
 
-  let session =
-    (await getSession(senderId, botId, redis)) || createDefaultSession();
-  session.history = session.history || [];
+  let session = ensureSessionShape((await getSession(senderId, botId, redis)) || createDefaultSession());
 
-  // ================== OFFLINE MODE (No Gemini) ==================
-  if (!ai) {
-    const got = await kbRetrieve(redis, botId, text);
-    const reply =
-      got?.answer ||
-      `أهلًا بيك 😊 تحب تشوف المتاح ولا عندك منتج معين؟`;
+  // 1) Load dynamic context
+  const recentTurns = await getRecentConversation(redis, botId, senderId, 8);
 
-    session.history.push({ user: text, bot: reply });
-    await setSession(senderId, botId, session, redis);
-    await sendText(senderId, reply, pageAccessToken);
+  // 2) FAQ exact hit (optional)
+  const faqHit = await getCachedFAQ(redis, botId, text);
 
-    // حتى في offline: نسجل لو الرد fallback (عشان نعرف الأسئلة الناقصة)
-    await kbSave(redis, botId, text, reply, { intent: "other", product: null });
-    return;
-  }
-
-  // ================== ONLINE MODE (Gemini) ==================
+  // 3) Gemini must reply
   let replyText = null;
-  let tags = { intent: "other", product: null };
 
-  try {
-    const prompt = buildGeminiPrompt({
-      catalog,
-      history: session.history,
-      userText: text,
-    });
+  if (!model) {
+    replyText = `أنا شغال دلوقتي بدون Gemini. ابعتلي تفاصيل أكتر عن اللي محتاجه 😊`;
+  } else {
+    try {
+      const prompt = buildGeminiPrompt({ catalog, recentTurns, userText: text, faqHit });
 
-    const resp = await ai.models.generateContent({
-      model: GEMINI_MODEL,
-      contents: prompt,
-    });
+      const resp = await model.generateContent(prompt);
+      replyText = resp?.response?.text?.() || resp?.response?.text || "";
 
-    const raw = resp?.text || "";
-    const parsed = safeExtractJSON(raw);
-
-    if (parsed?.reply) replyText = String(parsed.reply).trim();
-    if (parsed?.tags) tags = parsed.tags;
-  } catch (e) {
-    console.error("⚠️ Gemini failed:", e?.message || e);
-    replyText = null;
+      replyText = String(replyText).trim();
+      if (!replyText) replyText = "تمام 😊 ممكن توضحلي قصدك أكتر؟";
+    } catch (e) {
+      console.error("⚠️ Gemini failed:", e?.message || e);
+      replyText = "حصل عطل بسيط 😅 ممكن تبعت رسالتك تاني؟";
+    }
   }
 
-  if (!replyText) {
-    // لو Gemini وقع… جرب KB فورًا
-    const got = await kbRetrieve(redis, botId, text);
-    replyText =
-      got?.answer ||
-      `تمام 😊 تحب تشوف تيشيرت ولا هودي ولا قميص ولا بنطلون؟`;
-  }
-
-  // send + session
-  session.history.push({ user: text, bot: replyText });
-  await setSession(senderId, botId, session, redis);
+  // 4) Send ONLY Gemini reply
   await sendText(senderId, replyText, pageAccessToken);
 
-  // ✅ تسجيل من أول مرة (الأهم)
-  await kbSave(redis, botId, text, replyText, tags);
+  // 5) Bot learns silently
+  session.history.push({ user: text, gemini: replyText });
+  await setSession(senderId, botId, session, redis);
+
+  await pushConversation(redis, botId, senderId, { user: text, gemini: replyText, ts: Date.now() });
+  await saveFAQ(redis, botId, text, replyText);
 }
