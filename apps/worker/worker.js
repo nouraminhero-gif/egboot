@@ -7,7 +7,6 @@ import { salesReply } from "./sales.js";
 
 dotenv.config();
 
-// ✅ تأكيد وجود REDIS_URL
 const REDIS_URL = process.env.REDIS_URL || process.env.REDIS_PUBLIC_URL;
 if (!REDIS_URL) {
   console.error("❌ Missing REDIS_URL in environment variables");
@@ -16,7 +15,6 @@ if (!REDIS_URL) {
 
 console.log("🟡 Worker booting...");
 
-// ✅ Redis connection (Railway-friendly)
 const connection = new IORedis(REDIS_URL, {
   maxRetriesPerRequest: null,
   enableReadyCheck: false,
@@ -33,8 +31,7 @@ connection.on("error", (e) => console.error("❌ Redis error:", e?.message || e)
 connection.on("close", () => console.log("⚠️ Redis connection closed"));
 connection.on("reconnecting", () => console.log("🟠 Redis reconnecting..."));
 
-// ---- SaaS helpers ----
-const PAGE_BOT_PREFIX = "egboot:pagebot:"; // key: egboot:pagebot:<pageId> -> botId
+const PAGE_BOT_PREFIX = "egboot:pagebot:"; // egboot:pagebot:<pageId> => botId
 
 async function resolveBotId(jobData, event) {
   if (jobData?.botId) return jobData.botId;
@@ -51,20 +48,18 @@ async function resolveBotId(jobData, event) {
   }
 }
 
-function extractText(event) {
-  return event?.message?.text || "";
-}
-
 function isEcho(event) {
   return Boolean(event?.message?.is_echo);
 }
 
+function extractText(event) {
+  return event?.message?.text || "";
+}
+
 function extractMid(event) {
-  // Messenger message id
   return event?.message?.mid || null;
 }
 
-// ✅ BullMQ Worker
 const worker = new Worker(
   "messages",
   async (job) => {
@@ -74,34 +69,34 @@ const worker = new Worker(
       return { ok: false, reason: "missing event" };
     }
 
-    // ❌ ممنوع نرد على echo
     if (isEcho(event)) return { ok: true, skipped: "echo" };
 
     const senderId = event?.sender?.id;
     const text = extractText(event);
     const mid = extractMid(event);
 
-    // لو الرسالة مش نص (صورة/صوت) سيبها لمرحلة بعدين
+    // تجاهل أي رسالة مش نص دلوقتي
     if (!senderId || !text?.trim()) {
-      return { ok: true, skipped: "no-text", senderId: Boolean(senderId), hasText: Boolean(text) };
+      return { ok: true, skipped: "no-text" };
     }
 
-    // ✅ botId
     const botId = (await resolveBotId(job?.data, event)) || "clothes";
 
     const pageAccessToken = process.env.PAGE_ACCESS_TOKEN || "";
-    if (!pageAccessToken) console.warn("⚠️ PAGE_ACCESS_TOKEN missing in worker env. Replies may fail.");
+    if (!pageAccessToken) {
+      console.warn("⚠️ PAGE_ACCESS_TOKEN missing in worker env. Replies may fail.");
+    }
 
     await salesReply({
       botId,
       senderId,
       text,
-      mid, // ✅ مهم للـ dedup
+      mid,
       pageAccessToken,
       redis: connection,
     });
 
-    return { ok: true, botId };
+    return { ok: true };
   },
   {
     connection,
@@ -109,14 +104,12 @@ const worker = new Worker(
   }
 );
 
-// ✅ Worker events
 worker.on("ready", () => console.log("🟢 Worker ready"));
 worker.on("completed", (job, result) => console.log("🎉 Job completed:", job.id, result));
 worker.on("failed", (job, err) => console.error("❌ Job failed:", job?.id, err?.message || err));
 worker.on("error", (err) => console.error("🔥 Worker error:", err?.message || err));
 worker.on("stalled", (jobId) => console.warn("⏳ Job stalled:", jobId));
 
-// ✅ Graceful shutdown
 let shuttingDown = false;
 const shutdown = async (signal) => {
   if (shuttingDown) return;
