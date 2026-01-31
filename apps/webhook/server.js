@@ -1,5 +1,4 @@
 // apps/webhook/server.js
-
 import "dotenv/config";
 import express from "express";
 import { Queue } from "bullmq";
@@ -30,9 +29,7 @@ const connection = REDIS_URL
 
 connection?.on("connect", () => console.log("🔌 Redis connected (webhook)"));
 connection?.on("ready", () => console.log("✅ Redis ready (webhook)"));
-connection?.on("error", (e) =>
-  console.error("❌ Redis error (webhook):", e?.message || e)
-);
+connection?.on("error", (e) => console.error("❌ Redis error (webhook):", e?.message || e));
 
 const queue = connection
   ? new Queue("messages", {
@@ -47,16 +44,10 @@ const queue = connection
   : null;
 
 // ================= Routes =================
-
-// healthcheck
 app.get("/health", (req, res) => res.status(200).send("OK"));
 
-// root
-app.get("/", (req, res) =>
-  res.status(200).send("Egboot webhook running ✅")
-);
+app.get("/", (req, res) => res.status(200).send("Egboot webhook running ✅"));
 
-// verify webhook
 app.get("/webhook", (req, res) => {
   const mode = req.query["hub.mode"];
   const token = req.query["hub.verify_token"];
@@ -95,23 +86,23 @@ app.post("/webhook", async (req, res) => {
 
         const text = event?.message?.text;
         const payload = event?.postback?.payload;
-
         if (!text && !payload) continue;
 
-        const mid = event?.message?.mid;
+        const mid = event?.message?.mid || event?.postback?.mid || null;
 
-        // ❌ ممنوع :
+        // dedup by mid
         const jobId = mid ? `mid_${mid}` : undefined;
 
         await queue.add(
           "incoming_message",
           {
-            event,
-            receivedAt: Date.now(),
+            botId: process.env.BOT_ID || "clothes",
+            senderId: psid,
+            text: text || payload,
+            mid,
+            pageAccessToken: process.env.PAGE_ACCESS_TOKEN,
           },
-          {
-            jobId,
-          }
+          { jobId }
         );
       }
     }
@@ -132,12 +123,4 @@ async function shutdown(signal) {
     await queue?.close();
   } catch {}
   try {
-    await connection?.quit();
-  } catch {}
-
-  server.close(() => process.exit(0));
-  setTimeout(() => process.exit(1), 10000).unref();
-}
-
-process.on("SIGTERM", () => shutdown("SIGTERM"));
-process.on("SIGINT", () => shutdown("SIGINT"));
+    await
