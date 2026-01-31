@@ -4,10 +4,12 @@
   "type": "module",
   "main": "worker.js",
   "scripts": {
-    "start": "node worker.js"
+    "start": "node worker.js",
+    "export:kb": "node apps/worker/scripts/export_faq.js",
+    "import:kb": "node apps/worker/scripts/import_faq.js"
   },
   "dependencies": {
-    "@google/genai": "^0.7.0",
+    "@google/genai": "^1.0.0",
     "axios": "^1.7.9",
     "bullmq": "^5.12.10",
     "dotenv": "^16.4.5",
