@@ -183,14 +183,65 @@ async function saveFAQ(redis, botId, userText, answerText) {
   }
 }
 
+// ✅ عدّاد للأسئلة المتكررة (مفيد بعد شهر)
+async function bumpFaqCount(redis, botId, userText) {
+  if (!redis) return;
+  const nq = normalizeArabic(userText);
+  if (!nq) return;
+  try {
+    await redis.hincrby(`egboot:faq_count:${botId}`, sha1(nq), 1);
+    await redis.expire(`egboot:faq_count:${botId}`, 60 * 60 * 24 * 120); // 120 days
+  } catch {}
+}
+
+// ✅ منع تكرار الرد (مهم جدًا مع retries)
+async function shouldProcessMid(redis, botId, mid) {
+  if (!redis || !mid) return true;
+  const key = `egboot:mid:${botId}:${mid}`;
+  try {
+    // SETNX
+    const ok = await redis.set(key, "1", "NX", "EX", 60 * 60 * 24 * 7); // 7 days
+    return !!ok;
+  } catch {
+    return true;
+  }
+}
+
+// ================== Facebook Send ==================
+async function sendFacebookText({ pageAccessToken, senderId, text }) {
+  if (!pageAccessToken) {
+    console.warn("⚠️ Missing PAGE_ACCESS_TOKEN, cannot send message.");
+    return;
+  }
+
+  const url = `https://graph.facebook.com/v19.0/me/messages?access_token=${encodeURIComponent(
+    pageAccessToken
+  )}`;
+
+  const payload = {
+    recipient: { id: senderId },
+    messaging_type: "RESPONSE",
+    message: { text },
+  };
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    console.error("❌ FB send failed:", res.status, body);
+  }
+}
+
 // ================== Public API ==================
 export async function geminiGenerateReply({ botId, senderId, userText, redis }) {
   const catalog = DEFAULT_CATALOG;
 
-  // history for context
   const history = await loadHistory(redis, botId, senderId);
 
-  // slots for meta فقط
   const meta = {
     slots: {
       product: detectProduct(userText),
@@ -200,7 +251,6 @@ export async function geminiGenerateReply({ botId, senderId, userText, redis }) 
     },
   };
 
-  // Gemini disabled fallback
   if (!model) {
     const fallback = "أهلًا بيك 😊 قولي تحب تيشيرت ولا هودي ولا قميص ولا بنطلون؟";
     return { replyText: fallback, meta };
@@ -209,7 +259,8 @@ export async function geminiGenerateReply({ botId, senderId, userText, redis }) 
   try {
     const prompt = buildPrompt({ catalog, history, userText });
     const result = await model.generateContent(prompt);
-    const replyText = result?.response?.text()?.trim() || "تمام 😊 ممكن توضحلي قصدك أكتر؟";
+    const replyText =
+      result?.response?.text()?.trim() || "تمام 😊 ممكن توضحلي قصدك أكتر؟";
     return { replyText, meta };
   } catch (e) {
     console.error("⚠️ Gemini failed:", e?.message || e);
@@ -218,9 +269,53 @@ export async function geminiGenerateReply({ botId, senderId, userText, redis }) 
 }
 
 export async function observeAndLearn({ botId, senderId, userText, replyText, mid, redis, meta }) {
-  // 1) save turn history
   await saveTurn(redis, botId, senderId, userText, replyText, { ...meta, mid });
-
-  // 2) save FAQ (Q->A)
   await saveFAQ(redis, botId, userText, replyText);
+  await bumpFaqCount(redis, botId, userText);
+}
+
+// ================== The Missing Piece: salesReply ==================
+// ✅ ده اللي worker.js بيناديه
+export async function salesReply({
+  botId,
+  senderId,
+  text,
+  mid,
+  pageAccessToken,
+  redis,
+}) {
+  // ✅ منع duplicate reply لو BullMQ عمل retry
+  const okToProcess = await shouldProcessMid(redis, botId, mid);
+  if (!okToProcess) {
+    console.log("♻️ Duplicate mid skipped:", mid);
+    return { ok: true, duplicate: true };
+  }
+
+  // 1) Gemini يطلع الرد
+  const { replyText, meta } = await geminiGenerateReply({
+    botId,
+    senderId,
+    userText: text,
+    redis,
+  });
+
+  // 2) إرسال الرد للعميل (Gemini هو اللي بيرد فعليًا)
+  await sendFacebookText({
+    pageAccessToken,
+    senderId,
+    text: replyText,
+  });
+
+  // 3) البوت “يراقب ويتعلم” فقط (تسجيل Q/A)
+  await observeAndLearn({
+    botId,
+    senderId,
+    userText: text,
+    replyText,
+    mid,
+    redis,
+    meta,
+  });
+
+  return { ok: true };
 }
