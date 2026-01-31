@@ -15,43 +15,6 @@ if (!PAGE_ACCESS_TOKEN) {
   console.warn("⚠️ PAGE_ACCESS_TOKEN missing");
 }
 
-// ================== Helpers ==================
-function extractMessage(jobData = {}) {
-  // jobData ممكن يبقى:
-  // 1) الشكل القديم: { senderId, text, mid, botId, pageAccessToken }
-  // 2) شكل الويبهوك: { event: { sender:{id}, message:{text, mid} } }
-  // 3) أحيانًا jobData نفسه = event
-
-  const event = jobData.event || jobData;
-
-  const senderId =
-    jobData.senderId ||
-    event?.sender?.id ||
-    null;
-
-  const text =
-    jobData.text ||
-    event?.message?.text ||
-    event?.text ||
-    null;
-
-  const mid =
-    jobData.mid ||
-    event?.message?.mid ||
-    event?.mid ||
-    null;
-
-  const botId =
-    jobData.botId ||
-    BOT_ID;
-
-  const pageAccessToken =
-    jobData.pageAccessToken ||
-    PAGE_ACCESS_TOKEN;
-
-  return { botId, senderId, text, mid, pageAccessToken, event };
-}
-
 // ================== Worker ==================
 // 👈 لازم يطابق اسم الكيو في queue.js
 const QUEUE_NAME = "messages";
@@ -64,22 +27,61 @@ const worker = new Worker(
   async (job) => {
     const data = job.data || {};
 
-    const { botId, senderId, text, mid, pageAccessToken, event } = extractMessage(data);
+    /**
+     * We support 2 shapes:
+     *
+     * A) Direct:
+     * {
+     *   botId?: "clothes",
+     *   senderId: "PSID",
+     *   text: "رسالة العميل",
+     *   mid?: "m_xxx",
+     *   pageAccessToken?: "..."
+     * }
+     *
+     * B) Webhook event (your current server.js):
+     * {
+     *   event: { sender:{id}, message:{text,mid}, postback:{payload} ... },
+     *   receivedAt: ...
+     * }
+     */
+
+    const botId = data.botId || BOT_ID;
+    const pageAccessToken = data.pageAccessToken || PAGE_ACCESS_TOKEN;
+
+    // ✅ Support webhook format
+    const event = data.event || {};
+
+    // ✅ senderId from either direct or event
+    const senderId =
+      data.senderId ||
+      event?.sender?.id ||
+      null;
+
+    // ✅ text from either direct or event
+    const text =
+      data.text ||
+      event?.message?.text ||
+      event?.postback?.payload ||
+      null;
+
+    // ✅ mid from either direct or event
+    const mid =
+      data.mid ||
+      event?.message?.mid ||
+      null;
 
     if (!senderId || !text) {
       console.log("⚠️ Job skipped (missing senderId/text)", {
-        senderId,
-        text,
-        preview: {
-          hasEvent: Boolean(data?.event),
-          sender: event?.sender,
-          message: event?.message,
-          rawKeys: Object.keys(data || {}),
-        },
+        hasSenderId: Boolean(senderId),
+        hasText: Boolean(text),
+        keys: Object.keys(data || {}),
+        eventKeys: Object.keys(event || {}),
       });
       return { skipped: true };
     }
 
+    // ✅ Call salesReply
     await salesReply({
       botId,
       senderId,
@@ -93,7 +95,7 @@ const worker = new Worker(
   },
   {
     connection,
-    concurrency: 5,
+    concurrency: 5, // عدلها براحتك
   }
 );
 
@@ -109,12 +111,16 @@ worker.on("failed", (job, err) => {
 // ================== Graceful shutdown ==================
 process.on("SIGTERM", async () => {
   console.log("🛑 SIGTERM received, shutting down worker...");
-  await worker.close();
+  try {
+    await worker.close();
+  } catch {}
   process.exit(0);
 });
 
 process.on("SIGINT", async () => {
   console.log("🛑 SIGINT received, shutting down worker...");
-  await worker.close();
+  try {
+    await worker.close();
+  } catch {}
   process.exit(0);
 });
