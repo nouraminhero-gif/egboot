@@ -1,73 +1,72 @@
 // apps/worker/sales.js
 import dotenv from "dotenv";
 import axios from "axios";
-import crypto from "crypto";
 import { GoogleGenerativeAI } from "@google/generative-ai";
-
-import {
-  getSession,
-  setSession,
-  createDefaultSession,
-  getKB,
-  setKB,
-  bumpKBHit,
-} from "./session.js";
+import { getSession, setSession, createDefaultSession } from "./session.js";
+import crypto from "crypto";
 
 dotenv.config();
 
-// ================== Catalog (Clothes bot) ==================
-const catalog = {
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
+
+// ======= Catalog (default bot: clothes) =======
+const defaultCatalog = {
   categories: {
     tshirt: {
       name: "تيشيرت",
       price: 299,
       sizes: ["M", "L", "XL", "2XL"],
       colors: ["أسود", "أبيض", "كحلي", "رمادي", "بيج"],
-      material: "قطن مريح مناسب للاستخدام اليومي",
+      material: "قطن مريح مناسب للصيف والاستخدام اليومي",
     },
     hoodie: {
       name: "هودي",
       price: 599,
       sizes: ["M", "L", "XL", "2XL"],
-      colors: ["أسود", "رمادي", "كحلي", "زيتي", "بيج"],
+      colors: ["أسود", "رمادي", "كحلي", "بيج", "أوف وايت"],
       material: "خامة دافية ومناسبة للشتا",
     },
     shirt: {
       name: "قميص",
-      price: 449,
+      price: 499,
       sizes: ["M", "L", "XL", "2XL"],
       colors: ["أسود", "أبيض", "كحلي", "رمادي", "بيج"],
-      material: "قماش عملي وشكله شيك",
+      material: "قماش عملي للمشاوير والشغل",
     },
     pants: {
       name: "بنطلون",
-      price: 499,
+      price: 549,
       sizes: ["M", "L", "XL", "2XL"],
-      colors: ["أسود", "كحلي", "رمادي", "زيتي", "بيج"],
-      material: "قماش تقيل ومستحمل",
+      colors: ["أسود", "كحلي", "رمادي", "بيج", "زيتي"],
+      material: "خامة مريحة وتعيش معاك",
     },
   },
   shipping: {
     cairo_giza: 70,
     other_governorates: 90,
   },
-  notes: [
-    "المقاسات المتاحة من M لحد 2XL",
-    "الألوان المتاحة 5 ألوان",
-    "الشحن داخل القاهرة والجيزة 70 جنيه، وباقي المحافظات 90 جنيه",
+};
+
+// ======= Persona (default) =======
+const defaultPersona = {
+  tone: "لطيف ورايق",
+  greeting: "أهلًا بيك 👋",
+  styleRules: [
+    "اسأل سؤال واحد بس في كل رسالة",
+    "ماتفرضش (لازم تختار) — خليك مرن",
+    "اقترح بلُطف وباختيارات واضحة",
+    "استخدم إيموجي خفيف (1-2)",
   ],
 };
 
-// ================== Gemini Setup ==================
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
+// ======= Gemini Setup =======
 let model = null;
-
 if (GEMINI_API_KEY) {
   try {
     const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
-    // ✅ ثبّت الموديل هنا عشان نتجنب مشاكل الأسماء
-    model = genAI.getGenerativeModel({ model: "gemini-pro" });
-    console.log("🤖 Gemini ready: gemini-pro");
+    // ✅ موديل ثابت شغال غالبًا
+    model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+    console.log("🤖 Gemini ready: gemini-1.5-flash");
   } catch (e) {
     console.error("❌ Gemini init failed:", e?.message || e);
   }
@@ -75,9 +74,9 @@ if (GEMINI_API_KEY) {
   console.warn("⚠️ GEMINI_API_KEY missing. Gemini disabled.");
 }
 
-// ================== FB Send ==================
+// ======= FB Send =======
 async function sendText(psid, text, token) {
-  if (!psid || !token || !text) return;
+  if (!psid || !token) return;
 
   try {
     await axios.post(
@@ -94,153 +93,171 @@ async function sendText(psid, text, token) {
   }
 }
 
-// ================== Helpers ==================
-function normalizeQuestion(input = "") {
-  // تطبيع بسيط: lowercase + remove punctuation + collapse spaces
-  const s = String(input)
-    .trim()
+// ======= Helpers =======
+function normalizeQuestion(q) {
+  return (q || "")
     .toLowerCase()
-    .replace(/[^\p{L}\p{N}\s]/gu, " ")
+    .trim()
     .replace(/\s+/g, " ")
-    .trim();
-
-  return s;
+    .replace(/[^\p{L}\p{N}\s]/gu, ""); // remove punctuation
 }
 
-function questionKey(text) {
-  const norm = normalizeQuestion(text);
-  if (!norm) return "";
-  return crypto.createHash("sha1").update(norm).digest("hex");
+function hashKey(s) {
+  return crypto.createHash("sha1").update(s).digest("hex");
 }
 
-function extractTextFromEvent(event) {
-  const text = event?.message?.text;
-  const postback = event?.postback?.payload;
-  // لو postback رجّعه كنص عادي (عشان يرد)
-  return text || postback || "";
+function faqKey(botId, questionNorm) {
+  return `egboot:faq:${botId}:${hashKey(questionNorm)}`;
 }
 
-// ================== Persona / Prompt ==================
-function buildPrompt({ userText, session }) {
-  const lastTurns = (session?.history || []).slice(-6);
+async function getFAQ(redis, botId, questionNorm) {
+  if (!redis) return null;
+  try {
+    const raw = await redis.get(faqKey(botId, questionNorm));
+    return raw || null;
+  } catch {
+    return null;
+  }
+}
+
+async function setFAQ(redis, botId, questionNorm, answer) {
+  if (!redis) return;
+  try {
+    // TTL 30 يوم
+    await redis.set(faqKey(botId, questionNorm), answer, "EX", 60 * 60 * 24 * 30);
+  } catch {}
+}
+
+function getShippingText() {
+  return `الشحن: القاهرة والجيزة ${defaultCatalog.shipping.cairo_giza} جنيه، وباقي المحافظات ${defaultCatalog.shipping.other_governorates} جنيه.`;
+}
+
+function listProductsShort() {
+  const c = defaultCatalog.categories;
+  return `المتاح دلوقتي: ${c.tshirt.name} (${c.tshirt.price})، ${c.hoodie.name} (${c.hoodie.price})، ${c.shirt.name} (${c.shirt.price})، ${c.pants.name} (${c.pants.price}).`;
+}
+
+// ======= Prompt =======
+function buildPrompt({ persona, catalog, session, text }) {
+  const products = Object.values(catalog.categories).map((p) => ({
+    name: p.name,
+    price: p.price,
+    sizes: p.sizes,
+    colors: p.colors,
+    material: p.material,
+  }));
 
   return `
-أنت بائع ملابس محترم ولطيف وذكي. بتتكلم عربي مصري.
-ممنوع تفرض على العميل قرار. ممنوع تقول "لازم تختار" أو "عشان نكمل".
-أسلوبك: ترحيب بسيط + سؤال واحد ذكي يساعد العميل.
+أنت موظف مبيعات شاطر جدًا لبراند ملابس في مصر.
+الهدف: تساعد العميل يختار بسرعة وبأسلوب لطيف، وتجاوب على الأسئلة بوضوح.
 
-قواعد:
-- ردك قصير (1-3 جمل).
-- استخدم إيموجي خفيف (1 كحد أقصى).
-- لو العميل بيسأل عن الشحن: وضح القاهرة/الجيزة 70 وباقي المحافظات 90.
-- لو المقاس مش متوفر: اقترح بديل بلطف.
-- لو العميل سأل سؤال عام عن الجودة/الخامة: استخدم معلومات الخامات الموجودة.
-- ممنوع كلام تقني.
+قواعد أسلوبك:
+- ابدأ بتحية لطيفة لو دي أول رسالة من العميل أو العميل قال "السلام عليكم/هاي".
+- متقولش "لازم" و متضغطش على العميل.
+- اسأل سؤال واحد بس في آخر الرسالة لو محتاج معلومة.
+- ردود قصيرة (سطرين بالكتير).
+- استخدم 1-2 ايموجي فقط.
 
-الكتالوج:
-${JSON.stringify(catalog, null, 2)}
+معلومات المتجر:
+- ${getShippingText()}
+- المقاسات المتاحة عمومًا: M / L / XL / 2XL
+- الألوان: 5 ألوان حسب المنتج
+- المنتجات المتاحة: ${products.map((p) => p.name).join("، ")}
 
-سياق آخر محادثة:
-${JSON.stringify(lastTurns, null, 2)}
-
-حالة الطلب:
-${JSON.stringify(session?.order || {}, null, 2)}
+حالة المحادثة الحالية (للاسترشاد):
+${JSON.stringify(session, null, 2)}
 
 رسالة العميل:
-"${userText}"
+"${text}"
 
-اكتب الرد الآن:
+اكتب ردك باللهجة المصرية.
 `;
 }
 
-// ================== Fallback (لو Gemini وقع) ==================
-function fallbackReply(userText, session) {
-  const t = normalizeQuestion(userText);
+// ======= Simple fallback (لو Gemini وقع) =======
+function fallbackReply(text, session) {
+  const t = (text || "").toLowerCase();
 
-  // ترحيب لو أول رسالة
-  const isFirst = !session?.history?.length;
-  if (isFirst && (t.includes("السلام") || t.includes("سلام") || t.includes("hi") || t.includes("hello"))) {
-    return "وعليكم السلام 👋 تحب تشوف تيشيرت ولا هودي ولا قميص ولا بنطلون؟";
+  // تحية
+  if (t.includes("السلام") || t.includes("اهلا") || t.includes("hi") || t.includes("hello")) {
+    return `أهلًا بيك 👋 تحب تشوف المتاح ولا عندك منتج معين في بالك؟`;
   }
 
-  if (t.includes("شحن")) {
-    return "الشحن القاهرة والجيزة 70 جنيه، وباقي المحافظات 90 جنيه ✅ تحب الشحن لِـ انهي محافظة؟";
+  // شحن
+  if (t.includes("شحن") || t.includes("التوصيل") || t.includes("محافظات") || t.includes("القاهرة") || t.includes("الجيزة")) {
+    return `${getShippingText()} تحب الشحن يبقى على أنهي محافظة؟ 🙂`;
   }
 
-  if (t.includes("سعر") || t.includes("بكام") || t.includes("كام")) {
-    return "تمام 👌 تحب سعر التيشيرت ولا الهودي ولا القميص ولا البنطلون؟";
+  // المتاح
+  if (t.includes("الموجود") || t.includes("المتاح") || t.includes("عندكم ايه")) {
+    return `${listProductsShort()} تحب تيشيرت ولا هودي ولا قميص ولا بنطلون؟ 🙂`;
   }
 
-  if (t.includes("مقاس") || t.includes("وزني")) {
-    return "تمام 👌 قولي وزنك وطولك وأنا أرشحلك المقاس الأنسب من M لحد 2XL.";
+  // خامة / جودة
+  if (t.includes("خامة") || t.includes("جودة") || t.includes("تقيل") || t.includes("قطن")) {
+    return `الخامة عندنا مريحة وعمليّة ❤️ تحب المنتج يكون صيفي (تيشيرت/قميص) ولا شتوي (هودي)؟`;
   }
 
-  return "تمام 👌 تحب أساعدك تختار إيه بالظبط: نوع المنتج ولا المقاس ولا الألوان؟";
+  return `تمام 👌 قولّي بس إنت عايز (تيشيرت/هودي/قميص/بنطلون) وإيه اللون اللي بتحبه؟`;
 }
 
-// ================== Main Entry ==================
-// ✅ دي بتقبل event مباشرة عشان تشتغل مع worker.js اللي عندك
-export async function salesReply(event, pageAccessToken) {
-  const senderId = event?.sender?.id;
-  const userText = extractTextFromEvent(event);
-
-  if (!senderId) {
-    console.warn("⚠️ salesReply missing senderId");
+// ======= Main Entry =======
+export async function salesReply({ botId = "clothes", senderId, text, pageAccessToken, redis }) {
+  // حماية
+  if (!senderId || !text?.trim()) {
+    console.warn("⚠️ salesReply missing senderId/text");
     return;
   }
 
-  // لو مفيش نص، متكسرش الدنيا
-  if (!userText) {
-    console.warn("⚠️ salesReply: empty userText (skip)");
+  // Session
+  let session = (await getSession(botId, senderId)) || createDefaultSession();
+
+  // ✅ ممنوع البوت يبدأ كلام من نفسه
+  // هنا احنا بنرد فقط على رسالة العميل
+
+  const questionNorm = normalizeQuestion(text);
+
+  // 1) FAQ cache first
+  const cached = await getFAQ(redis, botId, questionNorm);
+  if (cached) {
+    // update session
+    session.history.push({ user: text, bot: cached, cached: true, at: Date.now() });
+    session.updatedAt = Date.now();
+    session.firstMessageSeen = true;
+    await setSession(botId, senderId, session);
+    await sendText(senderId, cached, pageAccessToken);
     return;
   }
 
-  // 1) session
-  let session = (await getSession(senderId)) || createDefaultSession();
+  // 2) Gemini
+  const persona = defaultPersona;
+  const catalog = defaultCatalog;
 
-  // 2) جرّب KB (التعلّم) الأول
-  const kbKey = questionKey(userText);
-  if (kbKey) {
-    const cached = await getKB(kbKey);
-    if (cached?.answer) {
-      await bumpKBHit(kbKey);
+  let replyText = null;
 
-      // خزّن في history
-      session.history.push({ user: userText, bot: cached.answer });
-      await setSession(senderId, session);
-
-      await sendText(senderId, cached.answer, pageAccessToken);
-      return;
-    }
-  }
-
-  // 3) Gemini
-  let replyText = "";
   if (model) {
     try {
-      const prompt = buildPrompt({ userText, session });
+      const prompt = buildPrompt({ persona, catalog, session, text });
       const result = await model.generateContent(prompt);
-      replyText = result?.response?.text?.() || "";
+      replyText = result?.response?.text?.() || null;
     } catch (e) {
       console.error("⚠️ Gemini failed:", e?.message || e);
     }
   }
 
-  // 4) fallback
+  // 3) fallback
   if (!replyText) {
-    replyText = fallbackReply(userText, session);
+    replyText = fallbackReply(text, session);
   } else {
-    // 5) Learn: خزّن إجابة Gemini كسؤال متكرر (لو ينفع)
-    // نخزن بس لو الإجابة "مختصرة ومفيدة"
-    if (kbKey && replyText.length >= 10 && replyText.length <= 350) {
-      await setKB(kbKey, replyText);
-    }
+    // 4) learn -> save FAQ answer
+    await setFAQ(redis, botId, questionNorm, replyText);
   }
 
-  // 6) update session
-  session.history.push({ user: userText, bot: replyText });
-  await setSession(senderId, session);
+  // 5) update session
+  session.history.push({ user: text, bot: replyText, at: Date.now() });
+  session.firstMessageSeen = true;
+  await setSession(botId, senderId, session);
 
-  // 7) send
+  // 6) send
   await sendText(senderId, replyText, pageAccessToken);
 }
