@@ -30,8 +30,8 @@ connection.on("error", (e) => console.error("❌ Redis error:", e?.message || e)
 connection.on("close", () => console.log("⚠️ Redis connection closed"));
 connection.on("reconnecting", () => console.log("🟠 Redis reconnecting..."));
 
-// SaaS mapping: egboot:pagebot:<pageId> => botId
-const PAGE_BOT_PREFIX = "egboot:pagebot:";
+// ---- SaaS helpers ----
+const PAGE_BOT_PREFIX = "egboot:pagebot:"; // key: egboot:pagebot:<pageId> -> botId
 
 async function resolveBotId(jobData, event) {
   if (jobData?.botId) return jobData.botId;
@@ -56,11 +56,7 @@ function isEcho(event) {
   return Boolean(event?.message?.is_echo);
 }
 
-function extractMid(event) {
-  return event?.message?.mid || null;
-}
-
-// Queue name MUST match webhook: "messages"
+// ✅ BullMQ Worker (Queue name MUST match webhook: "messages")
 const worker = new Worker(
   "messages",
   async (job) => {
@@ -70,25 +66,29 @@ const worker = new Worker(
       return { ok: false, reason: "missing event" };
     }
 
-    // never reply to echoes
+    // ❌ ممنوع نرد على echo
     if (isEcho(event)) {
       return { ok: true, skipped: "echo" };
     }
 
     const senderId = event?.sender?.id;
     const text = extractText(event);
-    const mid = extractMid(event);
 
-    // non-text -> skip for now
+    // ✅ mid عشان dedup
+    const mid = event?.message?.mid || null;
+
+    // لو الرسالة مش نص (صورة/صوت) سيبها لمرحلة بعدين
     if (!senderId || !text?.trim()) {
       return { ok: true, skipped: "no-text" };
     }
 
+    // ✅ botId (SaaS)
     const botId = await resolveBotId(job?.data, event);
     if (!botId) {
       console.warn("⚠️ botId missing, using default: clothes");
     }
 
+    // ✅ token (ممكن يبقى per bot later)
     const pageAccessToken = process.env.PAGE_ACCESS_TOKEN || "";
     if (!pageAccessToken) {
       console.warn("⚠️ PAGE_ACCESS_TOKEN missing in worker env. Replies may fail.");
@@ -98,7 +98,7 @@ const worker = new Worker(
       botId: botId || "clothes",
       senderId,
       text,
-      mid,
+      mid, // ✅ مهم
       pageAccessToken,
       redis: connection,
     });
@@ -117,6 +117,7 @@ worker.on("failed", (job, err) => console.error("❌ Job failed:", job?.id, err?
 worker.on("error", (err) => console.error("🔥 Worker error:", err?.message || err));
 worker.on("stalled", (jobId) => console.warn("⏳ Job stalled:", jobId));
 
+// ✅ Graceful shutdown
 let shuttingDown = false;
 const shutdown = async (signal) => {
   if (shuttingDown) return;
