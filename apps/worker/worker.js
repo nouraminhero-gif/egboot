@@ -3,11 +3,12 @@
 import dotenv from "dotenv";
 import { Worker } from "bullmq";
 import IORedis from "ioredis";
+
 import { salesReply } from "./sales.js";
 
 dotenv.config();
 
-// ================== Redis ==================
+// ✅ تأكيد وجود REDIS_URL
 const REDIS_URL = process.env.REDIS_URL || process.env.REDIS_PUBLIC_URL;
 if (!REDIS_URL) {
   console.error("❌ Missing REDIS_URL in environment variables");
@@ -16,141 +17,139 @@ if (!REDIS_URL) {
 
 console.log("🟡 Worker booting...");
 
-const redis = new IORedis(REDIS_URL, {
+// ✅ Redis connection (Railway-friendly)
+const connection = new IORedis(REDIS_URL, {
   maxRetriesPerRequest: null,
   enableReadyCheck: false,
-  retryStrategy(times) {
-    return Math.min(times * 300, 3000);
+  retryStrategy: (times) => {
+    const delay = Math.min(times * 200, 3000);
+    console.log(`🔁 Redis reconnect attempt #${times} in ${delay}ms`);
+    return delay;
   },
 });
 
-redis.on("connect", () => console.log("🔌 Redis connected"));
-redis.on("ready", () => console.log("✅ Redis ready"));
-redis.on("error", (e) => console.error("❌ Redis error:", e?.message || e));
-redis.on("reconnecting", () => console.log("🟠 Redis reconnecting"));
-redis.on("close", () => console.log("⚠️ Redis connection closed"));
+connection.on("connect", () => console.log("🔌 Redis connected"));
+connection.on("ready", () => console.log("✅ Redis ready"));
+connection.on("error", (e) => console.error("❌ Redis error:", e?.message || e));
+connection.on("close", () => console.log("⚠️ Redis connection closed"));
+connection.on("reconnecting", () => console.log("🟠 Redis reconnecting..."));
 
-// ================== SaaS helpers ==================
-const PAGE_BOT_PREFIX = "egboot:pagebot:"; 
-// egboot:pagebot:<pageId> => botId
+// ---- SaaS helpers ----
+// key: egboot:pagebot:<pageId> -> botId
+const PAGE_BOT_PREFIX = "egboot:pagebot:";
 
 async function resolveBotId(jobData, event) {
+  // 1) لو webhook باعت botId جاهز
   if (jobData?.botId) return jobData.botId;
 
+  // 2) لو لأ، نستنتج من pageId ونقرأ mapping من Redis
   const pageId = event?.recipient?.id;
   if (!pageId) return null;
 
   try {
-    return await redis.get(PAGE_BOT_PREFIX + pageId);
+    const botId = await connection.get(PAGE_BOT_PREFIX + pageId);
+    return botId || null;
   } catch (e) {
-    console.error("❌ resolveBotId error:", e?.message || e);
+    console.error("❌ resolveBotId Redis error:", e?.message || e);
     return null;
   }
 }
 
 function extractText(event) {
-  return (
-    event?.message?.text ||
-    event?.postback?.payload ||
-    event?.postback?.title ||
-    ""
-  );
+  return event?.message?.text || "";
+}
+
+function extractMid(event) {
+  return event?.message?.mid || null;
 }
 
 function isEcho(event) {
   return Boolean(event?.message?.is_echo);
 }
 
-// ================== Worker ==================
+// ✅ BullMQ Worker (Queue name MUST match webhook: "messages")
 const worker = new Worker(
   "messages",
   async (job) => {
     const event = job?.data?.event;
     if (!event) {
-      console.warn("⚠️ Job missing event");
-      return { ok: false };
+      console.warn("⚠️ Job missing event:", job?.id);
+      return { ok: false, reason: "missing event" };
     }
 
-    // تجاهل echo
+    // ❌ ممنوع نرد على echo (رسائل الصفحة لنفسها)
     if (isEcho(event)) {
       return { ok: true, skipped: "echo" };
     }
 
     const senderId = event?.sender?.id;
-    const text = extractText(event).trim();
+    const text = extractText(event);
+    const mid = extractMid(event);
 
-    // تجاهل أي رسالة فاضية أو غير نصية
-    if (!senderId || !text) {
+    // لو الرسالة مش نص (صورة/صوت/مرفقات) سيبها لمرحلة بعدين
+    if (!senderId || !text?.trim()) {
       return { ok: true, skipped: "no-text" };
     }
 
-    // botId (SaaS)
-    let botId = await resolveBotId(job.data, event);
+    // ✅ botId (SaaS)
+    const botId = await resolveBotId(job?.data, event);
     if (!botId) {
-      botId = "clothes"; // default مؤقت
-      console.warn("⚠️ botId missing, using default:", botId);
+      console.warn("⚠️ botId missing, using default: clothes");
     }
 
+    // ✅ token (ممكن يبقى per bot later)
     const pageAccessToken = process.env.PAGE_ACCESS_TOKEN || "";
     if (!pageAccessToken) {
-      console.warn("⚠️ PAGE_ACCESS_TOKEN missing");
+      console.warn("⚠️ PAGE_ACCESS_TOKEN missing in worker env. Replies may fail.");
     }
 
     await salesReply({
-      botId,
+      botId: botId || "clothes",
       senderId,
       text,
+      mid, // ✅ مهم عشان dedup
       pageAccessToken,
-      redis,
+      redis: connection, // ✅ Redis for sessions + FAQ cache + dedup
     });
 
     return { ok: true };
   },
   {
-    connection: redis,
+    connection,
     concurrency: Number(process.env.WORKER_CONCURRENCY || 3),
   }
 );
 
-// ================== Events ==================
+// ✅ Worker events
 worker.on("ready", () => console.log("🟢 Worker ready"));
-worker.on("completed", (job) =>
-  console.log("🎉 Job completed:", job.id)
-);
-worker.on("failed", (job, err) =>
-  console.error("❌ Job failed:", job?.id, err?.message || err)
-);
-worker.on("stalled", (jobId) =>
-  console.warn("⏳ Job stalled:", jobId)
-);
-worker.on("error", (err) =>
-  console.error("🔥 Worker error:", err?.message || err)
-);
+worker.on("completed", (job, result) => console.log("🎉 Job completed:", job.id, result));
+worker.on("failed", (job, err) => console.error("❌ Job failed:", job?.id, err?.message || err));
+worker.on("error", (err) => console.error("🔥 Worker error:", err?.message || err));
+worker.on("stalled", (jobId) => console.warn("⏳ Job stalled:", jobId));
 
-// ================== Graceful shutdown ==================
+// ✅ Graceful shutdown (Railway بيرسل SIGTERM)
 let shuttingDown = false;
-
-async function shutdown(signal) {
+const shutdown = async (signal) => {
   if (shuttingDown) return;
   shuttingDown = true;
 
-  console.log(`🛑 ${signal} received, shutting down worker...`);
+  console.log(`🛑 ${signal} received, stopping worker...`);
 
   try {
     await worker.close();
   } catch (e) {
-    console.error("⚠️ Worker close error:", e?.message || e);
+    console.error("⚠️ Error while closing worker:", e?.message || e);
   }
 
   try {
-    await redis.quit();
+    await connection.quit();
   } catch (e) {
-    console.error("⚠️ Redis quit error:", e?.message || e);
+    console.error("⚠️ Error while quitting Redis:", e?.message || e);
   }
 
   console.log("✅ Worker stopped");
   process.exit(0);
-}
+};
 
 process.on("SIGTERM", () => shutdown("SIGTERM"));
 process.on("SIGINT", () => shutdown("SIGINT"));
