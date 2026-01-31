@@ -1,14 +1,11 @@
 // apps/worker/worker.js
-
 import dotenv from "dotenv";
 import { Worker } from "bullmq";
 import IORedis from "ioredis";
-
 import { salesReply } from "./sales.js";
 
 dotenv.config();
 
-// ✅ تأكيد وجود REDIS_URL
 const REDIS_URL = process.env.REDIS_URL || process.env.REDIS_PUBLIC_URL;
 if (!REDIS_URL) {
   console.error("❌ Missing REDIS_URL in environment variables");
@@ -17,7 +14,6 @@ if (!REDIS_URL) {
 
 console.log("🟡 Worker booting...");
 
-// ✅ Redis connection (Railway-friendly)
 const connection = new IORedis(REDIS_URL, {
   maxRetriesPerRequest: null,
   enableReadyCheck: false,
@@ -35,14 +31,11 @@ connection.on("close", () => console.log("⚠️ Redis connection closed"));
 connection.on("reconnecting", () => console.log("🟠 Redis reconnecting..."));
 
 // ---- SaaS helpers ----
-// key: egboot:pagebot:<pageId> -> botId
-const PAGE_BOT_PREFIX = "egboot:pagebot:";
+const PAGE_BOT_PREFIX = "egboot:pagebot:"; // egboot:pagebot:<pageId> -> botId
 
 async function resolveBotId(jobData, event) {
-  // 1) لو webhook باعت botId جاهز
   if (jobData?.botId) return jobData.botId;
 
-  // 2) لو لأ، نستنتج من pageId ونقرأ mapping من Redis
   const pageId = event?.recipient?.id;
   if (!pageId) return null;
 
@@ -55,6 +48,10 @@ async function resolveBotId(jobData, event) {
   }
 }
 
+function isEcho(event) {
+  return Boolean(event?.message?.is_echo);
+}
+
 function extractText(event) {
   return event?.message?.text || "";
 }
@@ -63,11 +60,6 @@ function extractMid(event) {
   return event?.message?.mid || null;
 }
 
-function isEcho(event) {
-  return Boolean(event?.message?.is_echo);
-}
-
-// ✅ BullMQ Worker (Queue name MUST match webhook: "messages")
 const worker = new Worker(
   "messages",
   async (job) => {
@@ -77,7 +69,7 @@ const worker = new Worker(
       return { ok: false, reason: "missing event" };
     }
 
-    // ❌ ممنوع نرد على echo (رسائل الصفحة لنفسها)
+    // ❌ ممنوع نرد على echo
     if (isEcho(event)) {
       return { ok: true, skipped: "echo" };
     }
@@ -86,18 +78,16 @@ const worker = new Worker(
     const text = extractText(event);
     const mid = extractMid(event);
 
-    // لو الرسالة مش نص (صورة/صوت/مرفقات) سيبها لمرحلة بعدين
+    // لو الرسالة مش نص، تجاهل مؤقتًا
     if (!senderId || !text?.trim()) {
       return { ok: true, skipped: "no-text" };
     }
 
-    // ✅ botId (SaaS)
     const botId = await resolveBotId(job?.data, event);
     if (!botId) {
       console.warn("⚠️ botId missing, using default: clothes");
     }
 
-    // ✅ token (ممكن يبقى per bot later)
     const pageAccessToken = process.env.PAGE_ACCESS_TOKEN || "";
     if (!pageAccessToken) {
       console.warn("⚠️ PAGE_ACCESS_TOKEN missing in worker env. Replies may fail.");
@@ -107,9 +97,9 @@ const worker = new Worker(
       botId: botId || "clothes",
       senderId,
       text,
-      mid, // ✅ مهم عشان dedup
+      mid, // ✅ مهم جدًا للـ dedup
       pageAccessToken,
-      redis: connection, // ✅ Redis for sessions + FAQ cache + dedup
+      redis: connection,
     });
 
     return { ok: true };
@@ -120,21 +110,18 @@ const worker = new Worker(
   }
 );
 
-// ✅ Worker events
 worker.on("ready", () => console.log("🟢 Worker ready"));
 worker.on("completed", (job, result) => console.log("🎉 Job completed:", job.id, result));
 worker.on("failed", (job, err) => console.error("❌ Job failed:", job?.id, err?.message || err));
 worker.on("error", (err) => console.error("🔥 Worker error:", err?.message || err));
 worker.on("stalled", (jobId) => console.warn("⏳ Job stalled:", jobId));
 
-// ✅ Graceful shutdown (Railway بيرسل SIGTERM)
 let shuttingDown = false;
 const shutdown = async (signal) => {
   if (shuttingDown) return;
   shuttingDown = true;
 
   console.log(`🛑 ${signal} received, stopping worker...`);
-
   try {
     await worker.close();
   } catch (e) {
