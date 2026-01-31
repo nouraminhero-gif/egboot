@@ -2,9 +2,11 @@
 import dotenv from "dotenv";
 import axios from "axios";
 import crypto from "crypto";
-import { GoogleGenerativeAI } from "@google/generative-ai";
 
-import { getSession, setSession, createDefaultSession } from "./session.js";
+import { getSession as _getSession, setSession as _setSession, createDefaultSession } from "./session.js";
+
+// ✅ NEW SDK (recommended by official docs)
+import { GoogleGenAI } from "@google/genai";
 
 dotenv.config();
 
@@ -47,31 +49,19 @@ const DEFAULT_CATALOG = {
     cairoGiza: 70,
     otherGovernorates: 90,
   },
-  notes: [
-    "الأسعار بالجنيه المصري.",
-    "لو محتاج مساعدة في المقاس: قولي وزنك وطولك وعايزه واسع ولا مظبوط.",
-  ],
 };
 
 /**
- * ================== Gemini Setup ==================
- * ✅ بدون ping / بدون fallback loops
- * ✅ موديل ثابت مضمون
+ * ================== Gemini Setup (v1) ==================
+ * Docs show usage via @google/genai and model like gemini-2.5-flash 1
  */
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-1.5-flash";
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
+const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
 
-let model = null;
-
+let ai = null;
 if (GEMINI_API_KEY) {
-  try {
-    const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
-    model = genAI.getGenerativeModel({ model: GEMINI_MODEL });
-    console.log(`🤖 Gemini ready: ${GEMINI_MODEL}`);
-  } catch (e) {
-    console.error("❌ Gemini init failed:", e?.message || e);
-    model = null;
-  }
+  ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
+  console.log(`🤖 Gemini client ready (model default: ${GEMINI_MODEL})`);
 } else {
   console.warn("⚠️ GEMINI_API_KEY missing. Gemini disabled.");
 }
@@ -81,7 +71,6 @@ if (GEMINI_API_KEY) {
  */
 async function sendText(psid, text, token) {
   if (!psid || !token || !text) return;
-
   try {
     await axios.post(
       "https://graph.facebook.com/v18.0/me/messages",
@@ -120,37 +109,7 @@ function sha1(text) {
 
 function looksLikeGreeting(t) {
   const s = normalizeArabic(t);
-  return (
-    s.includes("السلام عليكم") ||
-    s.includes("سلام عليكم") ||
-    s === "سلام" ||
-    s.includes("اهلا") ||
-    s.includes("أهلا") ||
-    s.includes("هاي") ||
-    s.includes("hi")
-  );
-}
-
-function isFAQishQuestion(t) {
-  const s = normalizeArabic(t);
-  const keys = [
-    "سعر",
-    "بكام",
-    "الشحن",
-    "توصيل",
-    "المحافظات",
-    "القاهره",
-    "الجيزه",
-    "الالوان",
-    "اللون",
-    "المقاس",
-    "مقاسات",
-    "خامه",
-    "خامة",
-    "متاح",
-    "موجود",
-  ];
-  return keys.some((k) => s.includes(normalizeArabic(k)));
+  return s.includes("السلام عليكم") || s === "سلام" || s.includes("اهلا") || s.includes("هاي") || s.includes("hi");
 }
 
 function detectProduct(text) {
@@ -162,25 +121,66 @@ function detectProduct(text) {
   return null;
 }
 
+function extractColor(text, catalog) {
+  const s = normalizeArabic(text);
+  const allColors = new Set();
+  Object.values(catalog.categories).forEach((c) => c.colors.forEach((x) => allColors.add(normalizeArabic(x))));
+
+  for (const c of allColors) {
+    if (s.includes(c)) return c; // normalized
+  }
+  return null;
+}
+
+function extractSize(text) {
+  const s = normalizeArabic(text).toUpperCase();
+  // size patterns
+  const m = /(^|\s)(2XL|XXL|XL|L|M|S)(\s|$)/i.exec(text);
+  if (m?.[2]) return m[2].toUpperCase();
+  return null;
+}
+
 function detectGovernorateBucket(text) {
   const s = normalizeArabic(text);
-  if (s.includes("القاهره") || s.includes("القاهرة") || s.includes("الجيزه") || s.includes("الجيزة")) {
-    return "cairoGiza";
-  }
-  if (s.includes("محافظ") || s.includes("اسيوط") || s.includes("أسيوط")) return "otherGovernorates";
+  if (s.includes("القاهره") || s.includes("الجيزه")) return "cairoGiza";
+  return "otherGovernorates";
+}
+
+function extractPhone(text) {
+  const digits = String(text).replace(/[^\d]/g, "");
+  // Egypt-like 11 digits, or any 10-15 digits
+  if (digits.length >= 10 && digits.length <= 15) return digits;
   return null;
 }
 
 /**
+ * ================== Session wrappers ==================
+ */
+async function getSession(senderId, botId, redis) {
+  try {
+    return await _getSession(senderId, botId, redis);
+  } catch {
+    return await _getSession(senderId);
+  }
+}
+
+async function setSession(senderId, botId, session, redis) {
+  try {
+    return await _setSession(senderId, botId, session, redis);
+  } catch {
+    return await _setSession(senderId, session);
+  }
+}
+
+/**
  * ================== Dedup (avoid repeated replies) ==================
- * key: egboot:dedup:<botId>:<mid> => "1" (TTL 60s)
  */
 async function dedupCheck(redis, botId, mid) {
   if (!redis || !mid) return false;
   const key = `egboot:dedup:${botId}:${mid}`;
   try {
     const res = await redis.set(key, "1", "NX", "EX", 60);
-    return res !== "OK"; // لو مش OK يبقى اتعالج قبل كده
+    return res !== "OK";
   } catch (e) {
     console.error("❌ dedup redis error:", e?.message || e);
     return false;
@@ -188,22 +188,17 @@ async function dedupCheck(redis, botId, mid) {
 }
 
 /**
- * ================== FAQ Cache (Redis) ==================
- * key: egboot:faq:<botId>  (HASH)
- * field: sha1(normalizedQuestion)
- * value: answerText
+ * ================== FAQ Cache (learn from answers) ==================
  */
 async function getCachedFAQ(redis, botId, userText) {
   if (!redis) return null;
   const nq = normalizeArabic(userText);
   if (!nq) return null;
-
   const key = `egboot:faq:${botId}`;
   const field = sha1(nq);
 
   try {
-    const val = await redis.hget(key, field);
-    return val || null;
+    return (await redis.hget(key, field)) || null;
   } catch (e) {
     console.error("❌ FAQ hget error:", e?.message || e);
     return null;
@@ -227,86 +222,170 @@ async function saveFAQ(redis, botId, userText, answerText) {
 }
 
 /**
- * ================== Prompt (شخصية ألطف) ==================
+ * ================== “Smart flow” logic ==================
+ * stage:
+ * - ai: Gemini opens/handles conversation + fills slots
+ * - checkout: deterministic bot collects customer data & confirms order
  */
-function buildPrompt({ brandName, text, session, catalog }) {
-  return `
-أنت موظف مبيعات شاطر ولطيف في متجر ملابس اسمه "${brandName}".
-بتتكلم باللهجة المصرية، وبأسلوب محترم وخفيف، وإيموجي بسيطة 😊.
+function ensureSessionShape(session) {
+  session.history = session.history || [];
+  session.stage = session.stage || "ai";
+  session.slots = session.slots || {
+    product: null,
+    color: null, // normalized
+    size: null,
+    cityBucket: null,
+    customerName: null,
+    phone: null,
+    address: null,
+  };
+  return session;
+}
 
-قواعد مهمّة جدًا:
-- رد فقط على رسالة العميل الحالية.
-- ممنوع تبدأ كلام لوحدك.
-- لو العميل بدأ بتحية: رد تحية لطيفة الأول (من غير ما تدخل في بيع فورًا).
-- ممنوع تفرض قرار أو تقول "لازم".
-- خليك مُساعد: قدم معلومة + سؤال واحد بسيط في الآخر.
-- ردود قصيرة وواضحة (2-3 سطور).
+function formatColorForCatalog(normalizedColor, productKey, catalog) {
+  if (!normalizedColor) return null;
+  const colors = catalog.categories[productKey]?.colors || [];
+  const found = colors.find((c) => normalizeArabic(c) === normalizedColor);
+  return found || null;
+}
 
-بيانات المتجر:
-${JSON.stringify(catalog, null, 2)}
+function checkoutSummary(session, catalog) {
+  const { product, color, size, cityBucket } = session.slots;
+  const p = catalog.categories[product];
+  const shipping = cityBucket === "cairoGiza" ? catalog.shipping.cairoGiza : catalog.shipping.otherGovernorates;
+  const total = p.price + shipping;
 
-سياق مختصر للمحادثة:
-${JSON.stringify(session?.history?.slice?.(-6) || session, null, 2)}
-
-رسالة العميل:
-"${text}"
-
-اكتب رد واحد فقط:
-`;
+  return {
+    shipping,
+    total,
+    productName: p.name,
+    price: p.price,
+    colorLabel: formatColorForCatalog(color, product, catalog),
+    size,
+  };
 }
 
 /**
- * ================== Rule-based quick answers ==================
+ * ================== Gemini prompt (returns STRICT JSON) ==================
  */
-function ruleAnswer(text, catalog) {
+function buildGeminiPrompt({ catalog, session, userText }) {
+  // NOTE: Gemini هنا “بيبدأ الديل” من ناحية أسلوب الكلام، بس الرد بيطلع بعد رسالة العميل (Messenger rules)
+  return `
+أنت موظف مبيعات مصري شاطر وودود لمتجر ملابس اسمه "${catalog.brandName}".
+
+هدفك:
+1) ترد على رسالة العميل رد طبيعي ولطيف.
+2) تستخرج من كلام العميل إن أمكن:
+- product: (tshirt|hoodie|shirt|pants|null)
+- color: لون عربي موجود في الكتالوج أو null
+- size: (M|L|XL|2XL|null)
+- cityBucket: (cairoGiza|otherGovernorates|null) لو العميل ذكر محافظة/قاهرة/جيزة
+
+مهم جدًا:
+- متكتبش غير JSON فقط (بدون أي نص خارجه).
+- JSON بالشكل ده بالظبط:
+{
+  "reply": "string",
+  "slots": { "product": "...", "color": "...", "size": "...", "cityBucket": "..." }
+}
+
+بيانات الكتالوج:
+${JSON.stringify(catalog, null, 2)}
+
+سياق سابق مختصر:
+${JSON.stringify(session.history.slice(-6), null, 2)}
+
+رسالة العميل:
+"${userText}"
+`;
+}
+
+function safeExtractJSON(text) {
+  if (!text) return null;
+  const s = String(text).trim();
+  const first = s.indexOf("{");
+  const last = s.lastIndexOf("}");
+  if (first === -1 || last === -1 || last <= first) return null;
+
+  const candidate = s.slice(first, last + 1);
+  try {
+    return JSON.parse(candidate);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * ================== deterministic slot filling (pre-gemini) ==================
+ * عشان نحسن “قميص اسود” وما يلفّش في دايرة
+ */
+function fillSlotsFromText(session, text, catalog) {
+  const prod = detectProduct(text);
+  const colorNorm = extractColor(text, catalog);
+  const size = extractSize(text);
+
+  if (prod && !session.slots.product) session.slots.product = prod;
+  if (colorNorm && !session.slots.color) session.slots.color = colorNorm;
+  if (size && !session.slots.size) session.slots.size = size;
+
+  // city bucket
   const s = normalizeArabic(text);
-
-  // الشحن
-  if (s.includes("شحن") || s.includes("توصيل")) {
-    const bucket = detectGovernorateBucket(text);
-    if (bucket === "cairoGiza") {
-      return `تمام 😊 شحن القاهرة والجيزة ${catalog.shipping.cairoGiza} جنيه. تحب الشحن فين بالظبط؟`;
-    }
-    if (bucket === "otherGovernorates" || s.includes("محافظ")) {
-      return `تمام 😊 شحن المحافظات ${catalog.shipping.otherGovernorates} جنيه. تحب الشحن لأي محافظة؟`;
-    }
-    return `الشحن: القاهرة/الجيزة ${catalog.shipping.cairoGiza} جنيه — باقي المحافظات ${catalog.shipping.otherGovernorates} جنيه 😊 تحب الشحن فين؟`;
+  if ((s.includes("القاهره") || s.includes("الجيزه") || s.includes("محافظ")) && !session.slots.cityBucket) {
+    session.slots.cityBucket = detectGovernorateBucket(text);
   }
 
-  // الأسعار
-  if (s.includes("سعر") || s.includes("بكام") || s.includes("بكم")) {
-    const lines = Object.values(catalog.categories)
-      .map((c) => `• ${c.name}: ${c.price} جنيه`)
-      .join("\n");
-    return `أكيد 😊 دي الأسعار:\n${lines}\nتحب أنهي منتج؟`;
-  }
+  // phone
+  const phone = extractPhone(text);
+  if (phone && !session.slots.phone) session.slots.phone = phone;
+}
 
-  // المتاح
-  if (s.includes("المتاح") || s.includes("موجود") || s.includes("عندكم اي") || s.includes("عندكو اي")) {
-    const items = Object.values(catalog.categories).map((c) => c.name).join("، ");
-    return `أهلًا بيك 😊 المتاح عندنا حاليًا: ${items}. تحب تشوف أنهي واحد؟`;
-  }
+function slotsReadyForCheckout(session) {
+  const { product, color, size } = session.slots;
+  return Boolean(product && color && size);
+}
 
-  // منتج محدد
-  const prodKey = detectProduct(text);
-  if (prodKey) {
-    const p = catalog.categories[prodKey];
-    if (!p) return null;
+function nextQuestionForSlots(session, catalog) {
+  const { product, color, size } = session.slots;
 
-    if (s.includes("الوان") || s.includes("ألوان") || s.includes("لون")) {
-      return `ألوان ${p.name} المتاحة: ${p.colors.join("، ")} 😊 تحب أنهي لون؟`;
-    }
+  if (!product) return `تحب تشوف إيه من المتاح؟ (تيشيرت/هودي/قميص/بنطلون) 😊`;
 
-    if (s.includes("مقاس") || s.includes("مقاسات") || s.includes("xl") || s.includes("xxl") || s.includes("2xl")) {
-      return `مقاسات ${p.name} المتاحة: ${p.sizes.join(" / ")} 😊 تحب أنهي مقاس؟`;
-    }
+  const p = catalog.categories[product];
 
-    if (s.includes("خامه") || s.includes("خامة") || s.includes("جوده") || s.includes("جودة")) {
-      return `خامة ${p.name}: ${p.material} 😊 تحب أساعدك تختار مقاس؟`;
-    }
-  }
+  if (!color) return `تمام 😊 تحب أنهي لون في ${p.name}؟ المتاح: ${p.colors.join("، ")}`;
+
+  if (!size) return `جميل 😊 تحب أنهي مقاس؟ المتاح: ${p.sizes.join(" / ")}`;
 
   return null;
+}
+
+async function handleCheckout(session, text, catalog) {
+  // collect name/address/phone
+  const s = normalizeArabic(text);
+
+  if (!session.slots.customerName && (s.includes("اسمي") || s.includes("انا") || text.trim().length <= 25)) {
+    // محاولة بسيطة: خزن الاسم لو الرسالة قصيرة وغالبًا اسم
+    // (تقدر تطورها بعدين)
+    if (text.trim().length >= 3 && text.trim().length <= 30) session.slots.customerName = text.trim();
+  }
+
+  if (!session.slots.address && (s.includes("عنوان") || s.includes("شارع") || s.includes("ميدان") || text.trim().length > 25)) {
+    session.slots.address = text.trim();
+  }
+
+  const phone = extractPhone(text);
+  if (phone && !session.slots.phone) session.slots.phone = phone;
+
+  const missing = [];
+  if (!session.slots.customerName) missing.push("الاسم");
+  if (!session.slots.phone) missing.push("رقم الموبايل");
+  if (!session.slots.address) missing.push("العنوان");
+
+  if (missing.length) {
+    return `تمام 😊 ابعتلي ${missing.join(" + ")} عشان أكدلك الأوردر.`;
+  }
+
+  const sum = checkoutSummary(session, catalog);
+  return `تمام ✅ أوردر: ${sum.productName} (${sum.colorLabel}) مقاس ${sum.size}\nالسعر ${sum.price} + شحن ${sum.shipping} = الإجمالي ${sum.total} جنيه.\nتأكيد؟ (نعم/لا) 😊`;
 }
 
 /**
@@ -315,27 +394,15 @@ function ruleAnswer(text, catalog) {
 export async function salesReply({ botId = "clothes", senderId, text, pageAccessToken, redis, mid }) {
   if (!senderId || !text?.trim()) return;
 
-  // ✅ dedup
-  const isDup = await dedupCheck(redis, botId, mid);
-  if (isDup) {
-    console.log("🟣 dedup: skipped duplicate mid:", mid);
-    return;
-  }
+  const already = await dedupCheck(redis, botId, mid);
+  if (already) return;
 
-  // ✅ session
-  let session = (await getSession(senderId, botId, redis)) || createDefaultSession();
   const catalog = DEFAULT_CATALOG;
 
-  // ✅ تحية أول الرسالة
-  if (looksLikeGreeting(text)) {
-    const reply = `وعليكم السلام 😊 أهلًا بيك في ${catalog.brandName} 👋`;
-    session.history.push({ user: text, bot: reply });
-    await setSession(senderId, botId, session, redis);
-    await sendText(senderId, reply, pageAccessToken);
-    return;
-  }
+  let session = ensureSessionShape((await getSession(senderId, botId, redis)) || createDefaultSession());
+  fillSlotsFromText(session, text, catalog);
 
-  // ✅ FAQ cache
+  // ✅ FAQ first
   const cached = await getCachedFAQ(redis, botId, text);
   if (cached) {
     session.history.push({ user: text, bot: cached });
@@ -344,46 +411,79 @@ export async function salesReply({ botId = "clothes", senderId, text, pageAccess
     return;
   }
 
-  // ✅ rule quick
-  const quick = ruleAnswer(text, catalog);
-  if (quick) {
-    session.history.push({ user: text, bot: quick });
+  // ✅ If greeting: Gemini-style greeting (بس رد على رسالة العميل)
+  if (looksLikeGreeting(text)) {
+    // نخليها بسيطة جدًا
+    const reply = `وعليكم السلام 😊 أهلًا بيك في ${catalog.brandName} 👋 تحب تدور على إيه النهارده؟`;
+    session.history.push({ user: text, bot: reply });
     await setSession(senderId, botId, session, redis);
-    await saveFAQ(redis, botId, text, quick);
-    await sendText(senderId, quick, pageAccessToken);
+    await sendText(senderId, reply, pageAccessToken);
+    await saveFAQ(redis, botId, text, reply);
     return;
   }
 
-  // ✅ Gemini
+  // ✅ Switch to checkout once slots complete
+  if (slotsReadyForCheckout(session)) session.stage = "checkout";
+
+  // ✅ Checkout stage (deterministic)
+  if (session.stage === "checkout") {
+    const reply = await handleCheckout(session, text, catalog);
+    session.history.push({ user: text, bot: reply });
+    await setSession(senderId, botId, session, redis);
+    await sendText(senderId, reply, pageAccessToken);
+    await saveFAQ(redis, botId, text, reply);
+    return;
+  }
+
+  // ✅ AI stage: Gemini handles “opening the deal” + we still push slot questions smartly
+  // لو لسه ناقص slots، اسأل سؤال واحد واضح بدل التكرار الغبي
+  const slotQuestion = nextQuestionForSlots(session, catalog);
+
+  // Gemini attempt (best)
   let replyText = null;
-
-  if (model) {
-    const prompt = buildPrompt({ brandName: catalog.brandName, text, session, catalog });
-
+  if (ai) {
     try {
-      const result = await model.generateContent(prompt);
-      replyText = result?.response?.text?.() || null;
-      console.log("🧠 Gemini used:", GEMINI_MODEL);
+      const prompt = buildGeminiPrompt({ catalog, session, userText: text });
+      const resp = await ai.models.generateContent({
+        model: GEMINI_MODEL,
+        contents: prompt,
+      });
+
+      const raw = resp?.text || "";
+      const parsed = safeExtractJSON(raw);
+
+      if (parsed?.reply) replyText = parsed.reply;
+
+      // update slots from Gemini
+      const gs = parsed?.slots || {};
+      if (gs.product && !session.slots.product) session.slots.product = gs.product;
+      if (gs.color && !session.slots.color) session.slots.color = normalizeArabic(gs.color);
+      if (gs.size && !session.slots.size) session.slots.size = String(gs.size).toUpperCase();
+      if (gs.cityBucket && !session.slots.cityBucket) session.slots.cityBucket = gs.cityBucket;
+
+      // لو بعد Gemini اكتملت slots → checkout
+      if (slotsReadyForCheckout(session)) {
+        session.stage = "checkout";
+        const sum = checkoutSummary(session, catalog);
+        replyText =
+          replyText ||
+          `تمام ✅ اخترت ${sum.productName} (${sum.colorLabel}) مقاس ${sum.size}. ابعتلي الاسم + رقم الموبايل + العنوان عشان أكد الأوردر 😊`;
+      }
     } catch (e) {
       console.error("⚠️ Gemini failed:", e?.message || e);
       replyText = null;
     }
-  } else {
-    console.warn("⚠️ Gemini disabled/unavailable.");
   }
 
-  // ✅ fallback
+  // ✅ If Gemini not available / failed: ask next slot question (smart)
   if (!replyText) {
-    replyText = `تمام 😊 تحب تشوف إيه من المتاح؟ (تيشيرت/هودي/قميص/بنطلون)`;
+    replyText = slotQuestion || `تمام 😊 قولي تحب تيشيرت ولا هودي ولا قميص ولا بنطلون؟`;
   }
 
-  // ✅ save session + faq
   session.history.push({ user: text, bot: replyText });
   await setSession(senderId, botId, session, redis);
-
-  if (isFAQishQuestion(text)) {
-    await saveFAQ(redis, botId, text, replyText);
-  }
-
   await sendText(senderId, replyText, pageAccessToken);
+
+  // ✅ learn
+  await saveFAQ(redis, botId, text, replyText);
 }
