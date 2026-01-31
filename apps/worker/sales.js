@@ -3,7 +3,8 @@ import dotenv from "dotenv";
 import axios from "axios";
 import crypto from "crypto";
 import { GoogleGenerativeAI } from "@google/generative-ai";
-import { getSession as _getSession, setSession as _setSession, createDefaultSession } from "./session.js";
+
+import { getSession, setSession, createDefaultSession } from "./session.js";
 
 dotenv.config();
 
@@ -42,7 +43,10 @@ const DEFAULT_CATALOG = {
       material: "خامة عملية مناسبة للخروج والشغل",
     },
   },
-  shipping: { cairoGiza: 70, otherGovernorates: 90 },
+  shipping: {
+    cairoGiza: 70,
+    otherGovernorates: 90,
+  },
   notes: [
     "الأسعار بالجنيه المصري.",
     "لو محتاج مساعدة في المقاس: قولي وزنك وطولك وعايزه واسع ولا مظبوط.",
@@ -50,60 +54,26 @@ const DEFAULT_CATALOG = {
 };
 
 /**
- * ================== Gemini Setup (Lazy init) ==================
+ * ================== Gemini Setup ==================
+ * ✅ بدون ping / بدون fallback loops
+ * ✅ موديل ثابت مضمون
  */
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
-const PRIMARY_MODEL = process.env.GEMINI_MODEL || "gemini-1.0-pro";
-
-// fallback موديلات شائعة
-const MODEL_CANDIDATES = [
-  PRIMARY_MODEL,
-  "gemini-1.0-pro",
-  "gemini-1.5-flash",
-  "gemini-1.5-pro",
-];
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-1.5-flash";
 
 let model = null;
-let activeModelName = null;
-let geminiInitPromise = null;
 
-async function initGeminiModelOnce() {
-  if (model || activeModelName) return;
-  if (geminiInitPromise) return geminiInitPromise;
-
-  geminiInitPromise = (async () => {
-    if (!GEMINI_API_KEY) {
-      console.warn("⚠️ GEMINI_API_KEY missing. Gemini disabled.");
-      return;
-    }
-
-    // ⚠️ مهم: تأكد إن GEMINI_MODEL مش متسجل فيه API KEY بالغلط
-    if (PRIMARY_MODEL.startsWith("AIza")) {
-      console.error("❌ GEMINI_MODEL يبدو أنه API KEY بالغلط. حط GEMINI_API_KEY للـ key و GEMINI_MODEL لاسم موديل زي gemini-1.0-pro");
-      return;
-    }
-
+if (GEMINI_API_KEY) {
+  try {
     const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
-
-    for (const m of MODEL_CANDIDATES) {
-      try {
-        const tryModel = genAI.getGenerativeModel({ model: m });
-        // اختبار خفيف جدًا (بيستهلك شوية، بس مرة واحدة عند البوت)
-        await tryModel.generateContent("ping");
-        model = tryModel;
-        activeModelName = m;
-        console.log(`🤖 Gemini ready: ${m}`);
-        return;
-      } catch (e) {
-        const msg = e?.message || String(e);
-        console.warn(`⚠️ Gemini model not usable (${m}): ${msg}`);
-      }
-    }
-
-    console.error("❌ Gemini init failed: no usable model from candidates.");
-  })();
-
-  return geminiInitPromise;
+    model = genAI.getGenerativeModel({ model: GEMINI_MODEL });
+    console.log(`🤖 Gemini ready: ${GEMINI_MODEL}`);
+  } catch (e) {
+    console.error("❌ Gemini init failed:", e?.message || e);
+    model = null;
+  }
+} else {
+  console.warn("⚠️ GEMINI_API_KEY missing. Gemini disabled.");
 }
 
 /**
@@ -111,10 +81,15 @@ async function initGeminiModelOnce() {
  */
 async function sendText(psid, text, token) {
   if (!psid || !token || !text) return;
+
   try {
     await axios.post(
       "https://graph.facebook.com/v18.0/me/messages",
-      { recipient: { id: psid }, messaging_type: "RESPONSE", message: { text } },
+      {
+        recipient: { id: psid },
+        messaging_type: "RESPONSE",
+        message: { text },
+      },
       { params: { access_token: token } }
     );
   } catch (e) {
@@ -150,6 +125,7 @@ function looksLikeGreeting(t) {
     s.includes("سلام عليكم") ||
     s === "سلام" ||
     s.includes("اهلا") ||
+    s.includes("أهلا") ||
     s.includes("هاي") ||
     s.includes("hi")
   );
@@ -157,7 +133,23 @@ function looksLikeGreeting(t) {
 
 function isFAQishQuestion(t) {
   const s = normalizeArabic(t);
-  const keys = ["سعر", "بكام", "الشحن", "توصيل", "المحافظات", "القاهره", "الجيزه", "الالوان", "اللون", "المقاس", "مقاسات", "خامه", "خامة", "متاح", "موجود"];
+  const keys = [
+    "سعر",
+    "بكام",
+    "الشحن",
+    "توصيل",
+    "المحافظات",
+    "القاهره",
+    "الجيزه",
+    "الالوان",
+    "اللون",
+    "المقاس",
+    "مقاسات",
+    "خامه",
+    "خامة",
+    "متاح",
+    "موجود",
+  ];
   return keys.some((k) => s.includes(normalizeArabic(k)));
 }
 
@@ -172,40 +164,23 @@ function detectProduct(text) {
 
 function detectGovernorateBucket(text) {
   const s = normalizeArabic(text);
-  if (s.includes("القاهره") || s.includes("الجيزه")) return "cairoGiza";
+  if (s.includes("القاهره") || s.includes("القاهرة") || s.includes("الجيزه") || s.includes("الجيزة")) {
+    return "cairoGiza";
+  }
   if (s.includes("محافظ") || s.includes("اسيوط") || s.includes("أسيوط")) return "otherGovernorates";
   return null;
 }
 
 /**
- * ================== Session wrappers ==================
- */
-async function getSession(senderId, botId, redis) {
-  try {
-    return await _getSession(senderId, botId, redis);
-  } catch {
-    return await _getSession(senderId);
-  }
-}
-
-async function setSession(senderId, botId, session, redis) {
-  try {
-    return await _setSession(senderId, botId, session, redis);
-  } catch {
-    return await _setSession(senderId, session);
-  }
-}
-
-/**
- * ================== Dedup ==================
- * key: egboot:dedup:<botId>:<mid> TTL 60s
+ * ================== Dedup (avoid repeated replies) ==================
+ * key: egboot:dedup:<botId>:<mid> => "1" (TTL 60s)
  */
 async function dedupCheck(redis, botId, mid) {
   if (!redis || !mid) return false;
   const key = `egboot:dedup:${botId}:${mid}`;
   try {
     const res = await redis.set(key, "1", "NX", "EX", 60);
-    return res !== "OK";
+    return res !== "OK"; // لو مش OK يبقى اتعالج قبل كده
   } catch (e) {
     console.error("❌ dedup redis error:", e?.message || e);
     return false;
@@ -214,6 +189,9 @@ async function dedupCheck(redis, botId, mid) {
 
 /**
  * ================== FAQ Cache (Redis) ==================
+ * key: egboot:faq:<botId>  (HASH)
+ * field: sha1(normalizedQuestion)
+ * value: answerText
  */
 async function getCachedFAQ(redis, botId, userText) {
   if (!redis) return null;
@@ -249,30 +227,31 @@ async function saveFAQ(redis, botId, userText, answerText) {
 }
 
 /**
- * ================== Prompt ==================
+ * ================== Prompt (شخصية ألطف) ==================
  */
 function buildPrompt({ brandName, text, session, catalog }) {
   return `
 أنت موظف مبيعات شاطر ولطيف في متجر ملابس اسمه "${brandName}".
-بتتكلم عربي مصري مهذب، وإيموجي خفيفة 😊.
+بتتكلم باللهجة المصرية، وبأسلوب محترم وخفيف، وإيموجي بسيطة 😊.
 
-قواعد:
+قواعد مهمّة جدًا:
 - رد فقط على رسالة العميل الحالية.
-- ممنوع تفرض قرار (ممنوع "لازم").
-- إجابة قصيرة (سطرين-3).
-- لو السؤال واضح من بيانات المتجر: جاوب مباشرة.
-- في الآخر اسأل سؤال واحد بسيط يساعد تكمل الطلب (من غير ضغط).
+- ممنوع تبدأ كلام لوحدك.
+- لو العميل بدأ بتحية: رد تحية لطيفة الأول (من غير ما تدخل في بيع فورًا).
+- ممنوع تفرض قرار أو تقول "لازم".
+- خليك مُساعد: قدم معلومة + سؤال واحد بسيط في الآخر.
+- ردود قصيرة وواضحة (2-3 سطور).
 
 بيانات المتجر:
 ${JSON.stringify(catalog, null, 2)}
 
-سياق المحادثة (للفهم فقط):
-${JSON.stringify(session, null, 2)}
+سياق مختصر للمحادثة:
+${JSON.stringify(session?.history?.slice?.(-6) || session, null, 2)}
 
 رسالة العميل:
 "${text}"
 
-اكتب الرد الآن:
+اكتب رد واحد فقط:
 `;
 }
 
@@ -282,33 +261,49 @@ ${JSON.stringify(session, null, 2)}
 function ruleAnswer(text, catalog) {
   const s = normalizeArabic(text);
 
+  // الشحن
   if (s.includes("شحن") || s.includes("توصيل")) {
     const bucket = detectGovernorateBucket(text);
-    if (bucket === "cairoGiza") return `تمام 😊 شحن القاهرة والجيزة ${catalog.shipping.cairoGiza} جنيه. تحب الشحن فين بالظبط؟`;
-    if (bucket === "otherGovernorates" || s.includes("محافظ")) return `تمام 😊 شحن المحافظات ${catalog.shipping.otherGovernorates} جنيه. تحب الشحن لأي محافظة؟`;
+    if (bucket === "cairoGiza") {
+      return `تمام 😊 شحن القاهرة والجيزة ${catalog.shipping.cairoGiza} جنيه. تحب الشحن فين بالظبط؟`;
+    }
+    if (bucket === "otherGovernorates" || s.includes("محافظ")) {
+      return `تمام 😊 شحن المحافظات ${catalog.shipping.otherGovernorates} جنيه. تحب الشحن لأي محافظة؟`;
+    }
     return `الشحن: القاهرة/الجيزة ${catalog.shipping.cairoGiza} جنيه — باقي المحافظات ${catalog.shipping.otherGovernorates} جنيه 😊 تحب الشحن فين؟`;
   }
 
+  // الأسعار
   if (s.includes("سعر") || s.includes("بكام") || s.includes("بكم")) {
-    const lines = Object.values(catalog.categories).map((c) => `• ${c.name}: ${c.price} جنيه`).join("\n");
+    const lines = Object.values(catalog.categories)
+      .map((c) => `• ${c.name}: ${c.price} جنيه`)
+      .join("\n");
     return `أكيد 😊 دي الأسعار:\n${lines}\nتحب أنهي منتج؟`;
   }
 
+  // المتاح
   if (s.includes("المتاح") || s.includes("موجود") || s.includes("عندكم اي") || s.includes("عندكو اي")) {
     const items = Object.values(catalog.categories).map((c) => c.name).join("، ");
     return `أهلًا بيك 😊 المتاح عندنا حاليًا: ${items}. تحب تشوف أنهي واحد؟`;
   }
 
+  // منتج محدد
   const prodKey = detectProduct(text);
   if (prodKey) {
     const p = catalog.categories[prodKey];
     if (!p) return null;
 
-    if (s.includes("الوان") || s.includes("لون")) return `ألوان ${p.name} المتاحة: ${p.colors.join("، ")} 😊 تحب أنهي لون؟`;
-    if (s.includes("مقاس") || s.includes("مقاسات") || s.includes("xl") || s.includes("xxl") || s.includes("2xl"))
+    if (s.includes("الوان") || s.includes("ألوان") || s.includes("لون")) {
+      return `ألوان ${p.name} المتاحة: ${p.colors.join("، ")} 😊 تحب أنهي لون؟`;
+    }
+
+    if (s.includes("مقاس") || s.includes("مقاسات") || s.includes("xl") || s.includes("xxl") || s.includes("2xl")) {
       return `مقاسات ${p.name} المتاحة: ${p.sizes.join(" / ")} 😊 تحب أنهي مقاس؟`;
-    if (s.includes("خامه") || s.includes("خامة") || s.includes("جوده") || s.includes("جودة"))
+    }
+
+    if (s.includes("خامه") || s.includes("خامة") || s.includes("جوده") || s.includes("جودة")) {
       return `خامة ${p.name}: ${p.material} 😊 تحب أساعدك تختار مقاس؟`;
+    }
   }
 
   return null;
@@ -321,16 +316,17 @@ export async function salesReply({ botId = "clothes", senderId, text, pageAccess
   if (!senderId || !text?.trim()) return;
 
   // ✅ dedup
-  const already = await dedupCheck(redis, botId, mid);
-  if (already) {
+  const isDup = await dedupCheck(redis, botId, mid);
+  if (isDup) {
     console.log("🟣 dedup: skipped duplicate mid:", mid);
     return;
   }
 
+  // ✅ session
   let session = (await getSession(senderId, botId, redis)) || createDefaultSession();
   const catalog = DEFAULT_CATALOG;
 
-  // ✅ Greeting: "تحية بس" (زي ما انت عايز)
+  // ✅ تحية أول الرسالة
   if (looksLikeGreeting(text)) {
     const reply = `وعليكم السلام 😊 أهلًا بيك في ${catalog.brandName} 👋`;
     session.history.push({ user: text, bot: reply });
@@ -358,33 +354,36 @@ export async function salesReply({ botId = "clothes", senderId, text, pageAccess
     return;
   }
 
-  // ✅ Gemini (lazy init)
-  await initGeminiModelOnce();
-
+  // ✅ Gemini
   let replyText = null;
 
   if (model) {
     const prompt = buildPrompt({ brandName: catalog.brandName, text, session, catalog });
+
     try {
       const result = await model.generateContent(prompt);
       replyText = result?.response?.text?.() || null;
-      console.log("🧠 Gemini used:", activeModelName || "unknown");
+      console.log("🧠 Gemini used:", GEMINI_MODEL);
     } catch (e) {
       console.error("⚠️ Gemini failed:", e?.message || e);
       replyText = null;
     }
   } else {
-    console.warn("⚠️ Gemini model is null (disabled/unavailable).");
+    console.warn("⚠️ Gemini disabled/unavailable.");
   }
 
+  // ✅ fallback
   if (!replyText) {
-    replyText = `تمام 😊 تحبني أساعدك تختار إيه بالظبط؟ (تيشيرت/هودي/قميص/بنطلون)`;
+    replyText = `تمام 😊 تحب تشوف إيه من المتاح؟ (تيشيرت/هودي/قميص/بنطلون)`;
   }
 
+  // ✅ save session + faq
   session.history.push({ user: text, bot: replyText });
   await setSession(senderId, botId, session, redis);
 
-  if (isFAQishQuestion(text)) await saveFAQ(redis, botId, text, replyText);
+  if (isFAQishQuestion(text)) {
+    await saveFAQ(redis, botId, text, replyText);
+  }
 
   await sendText(senderId, replyText, pageAccessToken);
 }
