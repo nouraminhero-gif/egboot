@@ -1,22 +1,20 @@
 // apps/webhook/server.js
+
 import "dotenv/config";
 import express from "express";
 import { Queue } from "bullmq";
 import IORedis from "ioredis";
 
 const app = express();
-
 app.use(express.json({ limit: "2mb" }));
-app.use(express.urlencoded({ extended: true }));
 
 const PORT = process.env.PORT || 8080;
 
-// =======================
-// Redis / BullMQ connection
-// =======================
-const REDIS_URL = process.env.REDIS_URL || process.env.REDIS_PUBLIC_URL || "";
+// ================= Redis / Queue =================
+const REDIS_URL = process.env.REDIS_URL || process.env.REDIS_PUBLIC_URL;
+
 if (!REDIS_URL) {
-  console.warn("⚠️ REDIS_URL missing in webhook. Enqueue will be disabled.");
+  console.warn("⚠️ REDIS_URL missing. Webhook will NOT enqueue jobs.");
 }
 
 const connection = REDIS_URL
@@ -42,91 +40,68 @@ const queue = connection
       defaultJobOptions: {
         attempts: 3,
         backoff: { type: "exponential", delay: 1000 },
-        removeOnComplete: { count: 5000 },
-        removeOnFail: { count: 2000 },
+        removeOnComplete: 1000,
+        removeOnFail: 2000,
       },
     })
   : null;
 
-// =======================
-// Health + Root
-// =======================
+// ================= Routes =================
+
+// healthcheck
 app.get("/health", (req, res) => res.status(200).send("OK"));
-app.get("/", (req, res) => res.status(200).send("Egboot webhook running ✅"));
 
-// =======================
-// Verify webhook
-// =======================
+// root
+app.get("/", (req, res) =>
+  res.status(200).send("Egboot webhook running ✅")
+);
+
+// verify webhook
 app.get("/webhook", (req, res) => {
-  try {
-    const mode = req.query["hub.mode"];
-    const token = req.query["hub.verify_token"];
-    const challenge = req.query["hub.challenge"];
+  const mode = req.query["hub.mode"];
+  const token = req.query["hub.verify_token"];
+  const challenge = req.query["hub.challenge"];
 
-    const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
-    if (!VERIFY_TOKEN) {
-      console.error("❌ Missing VERIFY_TOKEN in env vars");
-      return res.sendStatus(500);
-    }
-
-    if (mode === "subscribe" && token === VERIFY_TOKEN) {
-      console.log("✅ Webhook verified");
-      return res.status(200).send(challenge);
-    }
-
-    return res.sendStatus(403);
-  } catch (err) {
-    console.error("❌ Webhook verify error:", err?.message || err);
+  if (!process.env.VERIFY_TOKEN) {
+    console.error("❌ VERIFY_TOKEN missing");
     return res.sendStatus(500);
   }
+
+  if (mode === "subscribe" && token === process.env.VERIFY_TOKEN) {
+    return res.status(200).send(challenge);
+  }
+
+  return res.sendStatus(403);
 });
 
-// =======================
-// Receive messages
-// =======================
+// receive messages
 app.post("/webhook", async (req, res) => {
-  // ✅ رد سريع لفيسبوك
+  // Facebook لازم ياخد رد فورًا
   res.sendStatus(200);
 
   try {
-    const body = req.body;
+    if (!queue) return;
 
-    // ✅ لازم object=page
+    const body = req.body;
     if (!body || body.object !== "page") return;
 
-    // ✅ لازم يكون عندنا queue
-    if (!queue) {
-      console.warn("⚠️ Queue not available (missing REDIS_URL).");
-      return;
-    }
-
-    const entries = Array.isArray(body.entry) ? body.entry : [];
-    for (const entry of entries) {
-      const messagingEvents = Array.isArray(entry.messaging)
-        ? entry.messaging
-        : [];
-
-      for (const event of messagingEvents) {
+    for (const entry of body.entry || []) {
+      for (const event of entry.messaging || []) {
         const psid = event?.sender?.id;
         if (!psid) continue;
 
-        // ✅ تجاهل echo عشان البوت ميكلمش نفسه
+        // تجاهل echo
         if (event?.message?.is_echo) continue;
 
-        // ✅ تجاهل delivery/read events
-        if (event?.delivery || event?.read) continue;
+        const text = event?.message?.text;
+        const payload = event?.postback?.payload;
 
-        const text = event?.message?.text?.trim();
-        const quickReplyPayload = event?.message?.quick_reply?.payload;
-        const postbackPayload = event?.postback?.payload;
+        if (!text && !payload) continue;
 
-        // ✅ لازم يبقى في input حقيقي من العميل (text أو quickReply أو postback)
-        const hasInput = Boolean(text || quickReplyPayload || postbackPayload);
-        if (!hasInput) continue;
+        const mid = event?.message?.mid;
 
-        // ✅ منع تكرار نفس الرسالة (لو mid موجود)
-        const mid = event?.message?.mid || null;
-        const jobId = mid ? `mid:${mid}` : undefined;
+        // ❌ ممنوع :
+        const jobId = mid ? `mid_${mid}` : undefined;
 
         await queue.add(
           "incoming_message",
@@ -135,7 +110,7 @@ app.post("/webhook", async (req, res) => {
             receivedAt: Date.now(),
           },
           {
-            jobId, // لو موجود يمنع double enqueue لنفس mid
+            jobId,
           }
         );
       }
@@ -145,20 +120,17 @@ app.post("/webhook", async (req, res) => {
   }
 });
 
+// ================= Server =================
 const server = app.listen(PORT, "0.0.0.0", () => {
   console.log("🚀 Webhook server running on port", PORT);
 });
 
-// =======================
-// Graceful shutdown
-// =======================
+// graceful shutdown
 async function shutdown(signal) {
-  console.log(`🛑 Received ${signal}. Shutting down...`);
-
+  console.log(`🛑 ${signal} received. Shutting down...`);
   try {
     await queue?.close();
   } catch {}
-
   try {
     await connection?.quit();
   } catch {}
