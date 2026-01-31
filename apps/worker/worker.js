@@ -1,58 +1,40 @@
 // apps/worker/worker.js
 import "dotenv/config";
-import { Worker } from "bullmq";
-import axios from "axios";
 
+import { Worker } from "bullmq";
 import { connection } from "./queue.js"; // نفس Redis instance
-import { geminiGenerateReply, observeAndLearn } from "./sales.js";
+import { salesReply } from "./sales.js";
 
 // ================== ENV ==================
 const PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN || "";
 const BOT_ID = process.env.BOT_ID || "clothes";
-const QUEUE_NAME = "messages";
-
-// ================== FB Send ==================
-async function sendText(psid, text, token) {
-  if (!psid || !token || !text) return;
-  try {
-    await axios.post(
-      "https://graph.facebook.com/v18.0/me/messages",
-      {
-        recipient: { id: psid },
-        messaging_type: "RESPONSE",
-        message: { text },
-      },
-      { params: { access_token: token } }
-    );
-  } catch (e) {
-    console.error("❌ FB send error:", e?.response?.data || e?.message);
-  }
-}
-
-// ================== Helpers ==================
-function extractTextFromEvent(event) {
-  // message text
-  const text = event?.message?.text;
-  if (text && String(text).trim()) return String(text).trim();
-
-  // postback payload (زرار)
-  const payload = event?.postback?.payload;
-  if (payload && String(payload).trim()) return String(payload).trim();
-
-  return null;
-}
-
-function extractMidFromEvent(event) {
-  return event?.message?.mid || event?.postback?.mid || null;
-}
-
-function extractSenderIdFromEvent(event) {
-  return event?.sender?.id || null;
-}
 
 // ================== Worker ==================
+const QUEUE_NAME = "messages";
+
 console.log("🟢 Worker starting...");
 console.log("📦 Queue:", QUEUE_NAME);
+
+function extractFromEvent(event) {
+  if (!event) return {};
+
+  const senderId = event?.sender?.id || null;
+
+  // رسالة نصية
+  const text = event?.message?.text || null;
+
+  // postback payload (زي أزرار)
+  const postbackPayload = event?.postback?.payload || null;
+
+  const finalText = text || postbackPayload || null;
+
+  const mid = event?.message?.mid || null;
+
+  // تجاهل echo
+  const isEcho = Boolean(event?.message?.is_echo);
+
+  return { senderId, text: finalText, mid, isEcho };
+}
 
 const worker = new Worker(
   QUEUE_NAME,
@@ -60,73 +42,57 @@ const worker = new Worker(
     const data = job.data || {};
 
     /**
-     * webhook بيبعت:
-     * {
-     *   event: {...facebook event...},
-     *   receivedAt: <timestamp>
-     * }
+     * ممكن يبقى job.data واحد من دول:
+     * 1) { senderId, text, mid, botId, pageAccessToken }
+     * 2) { event, receivedAt, botId, pageAccessToken }
      */
-    const event = data.event || null;
-    if (!event) {
-      console.log("⚠️ Job skipped (missing event)", data);
-      return { skipped: true };
+
+    const botId = data.botId || BOT_ID;
+    const pageAccessToken = data.pageAccessToken || PAGE_ACCESS_TOKEN;
+
+    let senderId = data.senderId || null;
+    let text = data.text || null;
+    let mid = data.mid || null;
+
+    // ✅ لو جاي event من webhook
+    if ((!senderId || !text) && data.event) {
+      const extracted = extractFromEvent(data.event);
+
+      if (extracted.isEcho) {
+        console.log("↩️ Echo ignored");
+        return { ignored: "echo" };
+      }
+
+      senderId = senderId || extracted.senderId;
+      text = text || extracted.text;
+      mid = mid || extracted.mid;
     }
-
-    // تجاهل echo
-    if (event?.message?.is_echo) return { skipped: true, echo: true };
-
-    const senderId = extractSenderIdFromEvent(event);
-    const text = extractTextFromEvent(event);
-    const mid = extractMidFromEvent(event);
 
     if (!senderId || !text) {
       console.log("⚠️ Job skipped (missing senderId/text)", {
+        hasEvent: Boolean(data.event),
         senderId,
-        text,
-        mid,
+        textPreview: String(text || "").slice(0, 50),
       });
       return { skipped: true };
     }
 
-    // ✅ Gemini only mode:
-    // - Gemini يرد
-    // - البوت يسجل ويتعلم فقط
-
-    const botId = BOT_ID;
-    const pageAccessToken = PAGE_ACCESS_TOKEN;
-
-    if (!pageAccessToken) {
-      console.warn("⚠️ PAGE_ACCESS_TOKEN missing (cannot reply to FB).");
-      // حتى لو مش هنعرف نرد، نسجل برضه
-    }
-
-    // 1) Gemini reply
-    const { replyText, meta } = await geminiGenerateReply({
+    // ✅ الرد + التعلم
+    await salesReply({
       botId,
       senderId,
-      userText: text,
-      redis: connection,
-    });
-
-    // 2) send reply (Gemini reply)
-    if (replyText && pageAccessToken) {
-      await sendText(senderId, replyText, pageAccessToken);
-    }
-
-    // 3) observe + learn (save Q/A + slots + history)
-    await observeAndLearn({
-      botId,
-      senderId,
-      userText: text,
-      replyText: replyText || "",
+      text,
       mid,
+      pageAccessToken,
       redis: connection,
-      meta,
     });
 
     return { ok: true };
   },
-  { connection, concurrency: 5 }
+  {
+    connection,
+    concurrency: 5,
+  }
 );
 
 // ================== Logs ==================
@@ -139,14 +105,13 @@ worker.on("failed", (job, err) => {
 });
 
 // ================== Graceful shutdown ==================
-process.on("SIGTERM", async () => {
-  console.log("🛑 SIGTERM received, shutting down worker...");
-  await worker.close();
+async function shutdown(signal) {
+  console.log(`🛑 ${signal} received, shutting down worker...`);
+  try {
+    await worker.close();
+  } catch {}
   process.exit(0);
-});
+}
 
-process.on("SIGINT", async () => {
-  console.log("🛑 SIGINT received, shutting down worker...");
-  await worker.close();
-  process.exit(0);
-});
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+process.on("SIGINT", () => shutdown("SIGINT"));
