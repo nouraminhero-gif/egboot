@@ -1,9 +1,10 @@
+// apps/webhook/server.js
 import "dotenv/config";
 import express from "express";
 import { Queue } from "bullmq";
 import IORedis from "ioredis";
 
-// Facebook OAuth
+// ✅ Facebook OAuth
 import { registerFacebookAuthRoutes } from "./auth-facebook.js";
 
 const app = express();
@@ -19,23 +20,23 @@ if (!REDIS_URL) {
   process.exit(1);
 }
 
-const connection = new IORedis(REDIS_URL, {
+const redis = new IORedis(REDIS_URL, {
   maxRetriesPerRequest: null,
   enableReadyCheck: false,
 });
 
-connection.on("connect", () => console.log("🔌 Redis connected"));
-connection.on("ready", () => console.log("✅ Redis ready"));
-connection.on("error", (e) =>
-  console.error("❌ Redis error:", e?.message || e)
+redis.on("connect", () => console.log("🔌 Redis connected (webhook)"));
+redis.on("ready", () => console.log("✅ Redis ready (webhook)"));
+redis.on("error", (e) =>
+  console.error("❌ Redis error (webhook):", e?.message || e)
 );
 
-// نخلي Redis متاح لباقي الملفات
-app.locals.redis = connection;
+// نخلي Redis متاح لباقي الملفات (auth-facebook.js)
+app.locals.redis = redis;
 
 // ================= Queue =================
 const queue = new Queue("messages", {
-  connection,
+  connection: redis,
   defaultJobOptions: {
     attempts: 3,
     backoff: { type: "exponential", delay: 1000 },
@@ -48,7 +49,9 @@ const queue = new Queue("messages", {
 app.get("/", (req, res) => res.send("Egboot webhook running ✅"));
 app.get("/health", (req, res) => res.send("OK"));
 
-// Facebook OAuth
+// ✅ Facebook OAuth Routes:
+// /connect?email=someone@gmail.com
+// /auth/facebook/callback
 registerFacebookAuthRoutes(app);
 
 // ================= Webhook Verify =================
@@ -60,39 +63,48 @@ app.get("/webhook", (req, res) => {
   if (mode === "subscribe" && token === process.env.VERIFY_TOKEN) {
     return res.status(200).send(challenge);
   }
-
   return res.sendStatus(403);
 });
 
 // ================= Webhook Receive =================
 app.post("/webhook", async (req, res) => {
+  // لازم نرد بسرعة
   res.sendStatus(200);
 
   const body = req.body;
   if (body?.object !== "page") return;
 
   for (const entry of body.entry || []) {
-    const pageId = entry.id; // ✅ ده ID الصفحة
+    const pageId = entry?.id || null;
 
     for (const event of entry.messaging || []) {
       if (event?.message?.is_echo) continue;
 
-      const senderId = event?.sender?.id;
-      const text = event?.message?.text;
-      const mid = event?.message?.mid;
+      const senderId = event?.sender?.id || null;
+      const text = event?.message?.text || null;
+      const mid = event?.message?.mid || null;
 
       if (!senderId || !text) continue;
 
+      // ✅ نحدد tenant/botId عن طريق صاحب الصفحة
+      // auth-facebook.js بيحط: page:<pageId>:owner_email = email
+      let botId = process.env.BOT_ID || "clothes";
+
       try {
+        if (pageId) {
+          const ownerEmail = await redis.get(`page:${pageId}:owner_email`);
+          if (ownerEmail) botId = ownerEmail; // نخليه botId = email (Multi-tenant)
+        }
+
         await queue.add(
           "incoming_message",
           {
-            botId: process.env.BOT_ID || "clothes",
+            botId,
+            pageId,          // ✅ مهم
             senderId,
             text,
             mid,
-            pageId, // ✅ أهم إضافة
-            event,  // مفيد للـ analytics
+            event,           // optional raw event
           },
           {
             jobId: mid ? `mid_${mid}` : undefined,
@@ -110,14 +122,13 @@ const server = app.listen(PORT, "0.0.0.0", () => {
   console.log(`🚀 Webhook running on port ${PORT}`);
 });
 
-// ================= Shutdown =================
+// ================= Graceful Shutdown =================
 async function shutdown(signal) {
   console.log(`🛑 ${signal} received`);
 
   try { await queue.close(); } catch {}
-
-  try { await connection.quit(); }
-  catch { connection.disconnect(); }
+  try { await redis.quit(); }
+  catch { try { redis.disconnect(); } catch {} }
 
   server.close(() => process.exit(0));
 }
