@@ -3,6 +3,8 @@ import express from "express";
 import { Queue } from "bullmq";
 import IORedis from "ioredis";
 
+import { registerFacebookAuthRoutes } from "./auth-facebook.js"; // ✅ NEW
+
 const app = express();
 app.use(express.json({ limit: "2mb" }));
 
@@ -36,6 +38,9 @@ const queue = new Queue("messages", {
     removeOnFail: 500,
   },
 });
+
+// ✅ Register OAuth routes
+registerFacebookAuthRoutes(app); // ✅ NEW
 
 // ================= Routes =================
 app.get("/", (req, res) => res.send("Egboot webhook running ✅"));
@@ -76,9 +81,7 @@ app.post("/webhook", async (req, res) => {
           text,
           mid,
         },
-        {
-          jobId: mid ? `mid_${mid}` : undefined,
-        }
+        { jobId: mid ? `mid_${mid}` : undefined }
       );
     }
   }
