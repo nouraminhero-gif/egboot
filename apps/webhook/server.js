@@ -1,3 +1,4 @@
+// apps/webhook/server.js
 import "dotenv/config";
 import express from "express";
 import { Queue } from "bullmq";
@@ -13,7 +14,6 @@ const PORT = process.env.PORT || 8080;
 
 // ================= Redis =================
 const REDIS_URL = process.env.REDIS_URL || process.env.REDIS_PUBLIC_URL;
-
 if (!REDIS_URL) {
   console.error("❌ REDIS_URL missing");
   process.exit(1);
@@ -31,15 +31,7 @@ connection.on("error", (e) =>
 );
 
 // ================= Queue =================
-const queue = new Queue("messages", {
-  connection,
-  defaultJobOptions: {
-    attempts: 3,
-    backoff: { type: "exponential", delay: 1000 },
-    removeOnComplete: 500,
-    removeOnFail: 500,
-  },
-});
+const queue = new Queue("messages", { connection });
 
 // ================= Routes =================
 app.get("/", (req, res) => res.send("Egboot webhook running ✅"));
@@ -62,48 +54,33 @@ app.get("/webhook", (req, res) => {
 
 // ================= Webhook Receive =================
 app.post("/webhook", async (req, res) => {
-  // لازم نرد 200 بسرعة
   res.sendStatus(200);
-
-  // ✅ اطبع شكل الـ body عشان تعرف الفيس بيبعت ايه
-  console.log("WEBHOOK BODY:", JSON.stringify(req.body, null, 2));
 
   const body = req.body;
   if (body.object !== "page") return;
 
   for (const entry of body.entry || []) {
-    const pageId = entry?.id || null;
+    const pageId = entry?.id; // ✅ ده Page ID اللي جاي منه الويبهوك
 
     for (const event of entry.messaging || []) {
-      // تجاهل echo
       if (event?.message?.is_echo) continue;
 
-      const senderId = event?.sender?.id || null;
+      const senderId = event?.sender?.id;
+      const text = event?.message?.text || event?.postback?.payload;
+      const mid = event?.message?.mid;
 
-      // message text
-      const text = event?.message?.text || null;
-      const mid = event?.message?.mid || null;
-
-      // postback payload (لو ضغط زرار)
-      const payload = event?.postback?.payload || null;
-
-      // لو مفيش text و فيه payload نحطه مكانه
-      const finalText = text || payload;
-
-      if (!senderId || !finalText) continue;
+      if (!senderId || !text) continue;
 
       await queue.add(
         "incoming_message",
         {
-          pageId,        // ✅ مهم: دي الصفحة اللي الحدث جاي منها
+          botId: process.env.BOT_ID || "clothes",
+          pageId,     // ✅ مهم جدًا
           senderId,
-          text: finalText,
+          text,
           mid,
-          event,         // ✅ لو احتجته بعدين
         },
-        {
-          jobId: mid ? `mid_${mid}` : undefined, // ✅ يمنع التكرار
-        }
+        { jobId: mid ? `mid_${mid}` : undefined }
       );
     }
   }
