@@ -4,7 +4,7 @@ import express from "express";
 import { Queue } from "bullmq";
 import IORedis from "ioredis";
 
-// ✅ Facebook OAuth routes
+// ✅ Facebook OAuth
 import { registerFacebookAuthRoutes } from "./auth-facebook.js";
 
 const app = express();
@@ -14,7 +14,6 @@ const PORT = process.env.PORT || 8080;
 
 // ================= Redis =================
 const REDIS_URL = process.env.REDIS_URL || process.env.REDIS_PUBLIC_URL;
-
 if (!REDIS_URL) {
   console.error("❌ REDIS_URL missing");
   process.exit(1);
@@ -31,6 +30,9 @@ connection.on("error", (e) =>
   console.error("❌ Redis error (webhook):", e?.message || e)
 );
 
+// ✅ مهم: نخلي Redis متاح لجوا auth-facebook.js
+app.locals.redis = connection;
+
 // ================= Queue =================
 const queue = new Queue("messages", {
   connection,
@@ -46,7 +48,9 @@ const queue = new Queue("messages", {
 app.get("/", (req, res) => res.send("Egboot webhook running ✅"));
 app.get("/health", (req, res) => res.send("OK"));
 
-// ✅ مهم: ده اللي كان ناقص عندك (بيسجل /connect و /callback)
+// ✅ Facebook OAuth Routes
+// /connect?email=someone@gmail.com
+// /auth/facebook/callback
 registerFacebookAuthRoutes(app);
 
 // ================= Webhook Verify =================
@@ -63,14 +67,15 @@ app.get("/webhook", (req, res) => {
 
 // ================= Webhook Receive =================
 app.post("/webhook", async (req, res) => {
-  // Facebook لازم ياخد 200 بسرعة
+  // ✅ لازم نرد بسرعة
   res.sendStatus(200);
 
   const body = req.body;
-  if (body.object !== "page") return;
+  if (body?.object !== "page") return;
 
   for (const entry of body.entry || []) {
     for (const event of entry.messaging || []) {
+      // تجاهل echo
       if (event?.message?.is_echo) continue;
 
       const senderId = event?.sender?.id;
@@ -79,6 +84,7 @@ app.post("/webhook", async (req, res) => {
 
       if (!senderId || !text) continue;
 
+      // ✅ نفس اللي عندك: نزود للـ Queue
       await queue.add(
         "incoming_message",
         {
@@ -105,10 +111,16 @@ async function shutdown(signal) {
   console.log(`🛑 ${signal} received`);
   try {
     await queue.close();
-    await connection.quit();
   } catch {}
+  try {
+    await connection.quit();
+  } catch {
+    try {
+      connection.disconnect();
+    } catch {}
+  }
   server.close(() => process.exit(0));
 }
 
-process.on("SIGTERM", () => shutdown("SIGTERM"));
-process.on("SIGINT", () => shutdown("SIGINT"));
+process.on("SIGTERM", shutdown);
+process.on("SIGINT", shutdown);
