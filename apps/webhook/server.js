@@ -1,9 +1,10 @@
+// apps/webhook/server.js
 import "dotenv/config";
 import express from "express";
 import { Queue } from "bullmq";
 import IORedis from "ioredis";
 
-// ✅ Facebook OAuth
+// ✅ Facebook OAuth routes
 import { registerFacebookAuthRoutes } from "./auth-facebook.js";
 
 const app = express();
@@ -13,6 +14,7 @@ const PORT = process.env.PORT || 8080;
 
 // ================= Redis =================
 const REDIS_URL = process.env.REDIS_URL || process.env.REDIS_PUBLIC_URL;
+
 if (!REDIS_URL) {
   console.error("❌ REDIS_URL missing");
   process.exit(1);
@@ -44,8 +46,8 @@ const queue = new Queue("messages", {
 app.get("/", (req, res) => res.send("Egboot webhook running ✅"));
 app.get("/health", (req, res) => res.send("OK"));
 
-// ✅ Facebook OAuth Routes (بتضيف /connect و /auth/facebook/callback)
-registerFacebookAuthRoutes(app, { redis: connection });
+// ✅ مهم: ده اللي كان ناقص عندك (بيسجل /connect و /callback)
+registerFacebookAuthRoutes(app);
 
 // ================= Webhook Verify =================
 app.get("/webhook", (req, res) => {
@@ -61,13 +63,13 @@ app.get("/webhook", (req, res) => {
 
 // ================= Webhook Receive =================
 app.post("/webhook", async (req, res) => {
+  // Facebook لازم ياخد 200 بسرعة
   res.sendStatus(200);
 
   const body = req.body;
   if (body.object !== "page") return;
 
   for (const entry of body.entry || []) {
-    const pageId = entry?.id; // ✅ مهم للـ SaaS
     for (const event of entry.messaging || []) {
       if (event?.message?.is_echo) continue;
 
@@ -80,13 +82,14 @@ app.post("/webhook", async (req, res) => {
       await queue.add(
         "incoming_message",
         {
-          pageId,
+          botId: process.env.BOT_ID || "clothes",
           senderId,
           text,
           mid,
-          // botId: ... (هنخليه بعدين لما نربط كل عميل)
         },
-        { jobId: mid ? `mid_${mid}` : undefined }
+        {
+          jobId: mid ? `mid_${mid}` : undefined,
+        }
       );
     }
   }
@@ -107,5 +110,5 @@ async function shutdown(signal) {
   server.close(() => process.exit(0));
 }
 
-process.on("SIGTERM", shutdown);
-process.on("SIGINT", shutdown);
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+process.on("SIGINT", () => shutdown("SIGINT"));
