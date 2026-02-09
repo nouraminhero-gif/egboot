@@ -1,5 +1,7 @@
+// apps/webhook/auth-facebook.js
 import axios from "axios";
 import crypto from "crypto";
+import IORedis from "ioredis";
 
 const FB_GRAPH = "https://graph.facebook.com/v19.0";
 
@@ -9,144 +11,194 @@ function mustEnv(name) {
   return v;
 }
 
-function randomState() {
-  return crypto.randomBytes(16).toString("hex");
+function buildRedirectUri(baseUrl) {
+  // مهم: لازم يطابق اللي هتحطه في Meta Developer (Valid OAuth Redirect URIs)
+  return `${baseUrl.replace(/\/$/, "")}/facebook/callback`;
 }
 
-async function graphGET(path, params) {
-  const res = await axios.get(`${FB_GRAPH}${path}`, { params });
-  return res.data;
+function safeHtml(text) {
+  return String(text || "").replace(/[<>&"]/g, (c) => ({
+    "<": "&lt;",
+    ">": "&gt;",
+    "&": "&amp;",
+    '"': "&quot;",
+  }[c]));
 }
 
-async function graphPOST(path, params, body = {}) {
-  const res = await axios.post(`${FB_GRAPH}${path}`, body, { params });
-  return res.data;
-}
-
-/**
- * Redis Keys (SaaS style)
- * - state:{state} -> userId (اختياري)
- * - user:{userId}:fb_user_token -> user access token (قصير/طويل)
- * - page:{pageId}:token -> PAGE_ACCESS_TOKEN (ده اللي هنستخدمه للردود)
- */
-export function registerFacebookAuthRoutes(app, { redis }) {
+export function registerFacebookAuthRoutes(app) {
   const FB_APP_ID = mustEnv("FB_APP_ID");
   const FB_APP_SECRET = mustEnv("FB_APP_SECRET");
   const BASE_URL = mustEnv("BASE_URL"); // مثال: https://egboot-production-dbb3.up.railway.app
 
-  // ✅ 1) start connect
-  // افتح: /connect?userId=123
+  const REDIS_URL = process.env.REDIS_URL || process.env.REDIS_PUBLIC_URL;
+  if (!REDIS_URL) throw new Error("Missing REDIS_URL / REDIS_PUBLIC_URL");
+
+  const redis = new IORedis(REDIS_URL, {
+    maxRetriesPerRequest: null,
+    enableReadyCheck: false,
+  });
+
+  const REDIRECT_URI = buildRedirectUri(BASE_URL);
+
+  // ========= 1) Start OAuth: /connect =========
+  // تقدر تبعت botId من تطبيقك: /connect?botId=clothes
+  // وتقدر تحدد pageId لو عايز صفحة معينة: /connect?botId=clothes&pageId=123
   app.get("/connect", async (req, res) => {
     try {
-      const userId = String(req.query.userId || "demo"); // مؤقتًا demo لحد ما تربطه بيوزر سيستم بتاعك
-      const state = randomState();
+      const botId = (req.query.botId || "default").toString();
+      const desiredPageId = req.query.pageId ? String(req.query.pageId) : null;
 
-      // خزّن الـ state عشان نتحقق في callback
-      await redis.set(`state:${state}`, userId, "EX", 10 * 60); // 10 دقايق
+      // state عشان الأمان + عشان نرجع botId بعد الكولباك
+      const state = crypto.randomBytes(16).toString("hex");
 
-      // permissions (حسب SaaS Messenger)
+      await redis.set(
+        `fb_oauth_state:${state}`,
+        JSON.stringify({ botId, desiredPageId }),
+        "EX",
+        10 * 60 // 10 دقائق
+      );
+
+      // الصلاحيات (ممكن تزود/تقلل حسب احتياجك)
+      // لو هدفك Messenger على Pages غالبًا هتحتاج:
+      // pages_show_list + pages_messaging + pages_manage_metadata
       const scope = [
-        "public_profile",
-        "email",
         "pages_show_list",
-        "pages_manage_metadata",
         "pages_messaging",
+        "pages_manage_metadata",
         "pages_read_engagement",
       ].join(",");
 
-      const redirectUri = `${BASE_URL}/auth/facebook/callback`;
-
-      const fbUrl =
+      const url =
         `https://www.facebook.com/v19.0/dialog/oauth` +
         `?client_id=${encodeURIComponent(FB_APP_ID)}` +
-        `&redirect_uri=${encodeURIComponent(redirectUri)}` +
+        `&redirect_uri=${encodeURIComponent(REDIRECT_URI)}` +
         `&state=${encodeURIComponent(state)}` +
         `&response_type=code` +
         `&scope=${encodeURIComponent(scope)}`;
 
-      return res.redirect(fbUrl);
+      return res.redirect(url);
     } catch (e) {
-      return res.status(500).send(`Connect error: ${e?.message || e}`);
+      return res.status(500).send(`connect error: ${safeHtml(e?.message || e)}`);
     }
   });
 
-  // ✅ 2) callback
-  app.get("/auth/facebook/callback", async (req, res) => {
+  // ========= 2) OAuth Callback: /facebook/callback =========
+  app.get("/facebook/callback", async (req, res) => {
     try {
-      const code = req.query.code;
-      const state = req.query.state;
+      const code = req.query.code ? String(req.query.code) : null;
+      const state = req.query.state ? String(req.query.state) : null;
 
       if (!code || !state) return res.status(400).send("Missing code/state");
 
-      const userId = await redis.get(`state:${state}`);
-      if (!userId) return res.status(400).send("State expired/invalid");
+      const stateRaw = await redis.get(`fb_oauth_state:${state}`);
+      if (!stateRaw) return res.status(400).send("Invalid/expired state");
 
-      const redirectUri = `${BASE_URL}/auth/facebook/callback`;
+      await redis.del(`fb_oauth_state:${state}`);
 
-      // Exchange code -> short-lived user token
-      const tokenData = await graphGET("/oauth/access_token", {
-        client_id: FB_APP_ID,
-        client_secret: FB_APP_SECRET,
-        redirect_uri: redirectUri,
-        code,
+      const { botId, desiredPageId } = JSON.parse(stateRaw);
+
+      // 1) exchange code -> user access token
+      const tokenResp = await axios.get(`${FB_GRAPH}/oauth/access_token`, {
+        params: {
+          client_id: FB_APP_ID,
+          client_secret: FB_APP_SECRET,
+          redirect_uri: REDIRECT_URI,
+          hookup: "0",
+          code,
+        },
+        timeout: 10000,
       });
 
-      const userToken = tokenData.access_token;
+      const userAccessToken = tokenResp.data?.access_token;
+      if (!userAccessToken) return res.status(500).send("No user access token");
 
-      // (اختياري) exchange -> long-lived
-      const longData = await graphGET("/oauth/access_token", {
-        grant_type: "fb_exchange_token",
-        client_id: FB_APP_ID,
-        client_secret: FB_APP_SECRET,
-        fb_exchange_token: userToken,
+      // 2) get pages the user manages: /me/accounts
+      const pagesResp = await axios.get(`${FB_GRAPH}/me/accounts`, {
+        params: {
+          access_token: userAccessToken,
+          fields: "id,name,access_token",
+        },
+        timeout: 10000,
       });
 
-      const longUserToken = longData.access_token || userToken;
-
-      await redis.set(`user:${userId}:fb_user_token`, longUserToken, "EX", 60 * 60 * 24 * 50);
-
-      // Get pages
-      const pages = await graphGET("/me/accounts", {
-        access_token: longUserToken,
-      });
-
-      const first = pages?.data?.[0];
-      if (!first?.id || !first?.access_token) {
+      const pages = pagesResp.data?.data || [];
+      if (!pages.length) {
         return res
           .status(400)
-          .send("No pages found. Make sure you are admin of a page.");
+          .send("No pages found. Ensure the logged-in FB user manages at least one Page.");
       }
 
-      const pageId = first.id;
-      const pageAccessToken = first.access_token;
+      // اختار صفحة واحدة: يا إما pageId اللي جاي من الكويري، يا إما أول صفحة
+      const chosen =
+        (desiredPageId && pages.find((p) => String(p.id) === String(desiredPageId))) ||
+        pages[0];
 
-      // خزّن توكن الصفحة (ده المهم للردود)
-      await redis.set(`page:${pageId}:token`, pageAccessToken, "EX", 60 * 60 * 24 * 50);
+      const pageId = String(chosen.id);
+      const pageName = String(chosen.name || "");
+      const pageAccessToken = chosen.access_token;
 
-      // subscribe app to page (عشان webhooks)
-      try {
-        await graphPOST(`/${pageId}/subscribed_apps`, { access_token: pageAccessToken });
-      } catch (e) {
-        // مش دايمًا بتفشل بسبب صلاحيات/مود
-        console.log("⚠️ subscribe warning:", e?.response?.data || e?.message || e);
-      }
+      if (!pageAccessToken) return res.status(500).send("No page access token");
 
-      // صفحة بسيطة للمستخدم
-      return res.send(
-        `✅ Connected!\nuserId=${userId}\npageId=${pageId}\n\nNext: افتح /me عشان تتأكد التوكن متخزن (هنعملها بعدين)`
+      // 3) خزّن الإعدادات في Redis (SaaS style: لكل botId توكن مختلف)
+      // تقدر تغيّر الكي حسب نظامك
+      const key = `bot:${botId}:fb`;
+      await redis.set(
+        key,
+        JSON.stringify({
+          botId,
+          pageId,
+          pageName,
+          pageAccessToken,
+          connectedAt: Date.now(),
+        })
       );
+
+      // HTML بسيط يرجّعك للموبايل
+      return res
+        .status(200)
+        .send(
+          `
+          <html>
+            <body style="font-family:Arial;padding:20px">
+              <h2>✅ Connected Successfully</h2>
+              <p><b>botId:</b> ${safeHtml(botId)}</p>
+              <p><b>Page:</b> ${safeHtml(pageName)} (${safeHtml(pageId)})</p>
+              <p>دلوقتي البوت يقدر يشتغل بالـ Page Access Token اللي اتخزن في Redis.</p>
+              <hr />
+              <p>اختبار سريع:</p>
+              <code>${safeHtml(BASE_URL)}/connect/status?botId=${safeHtml(botId)}</code>
+            </body>
+          </html>
+          `
+        );
     } catch (e) {
-      return res.status(500).send(`Callback error: ${e?.response?.data?.error?.message || e?.message || e}`);
+      const msg = e?.response?.data ? JSON.stringify(e.response.data) : (e?.message || e);
+      return res.status(500).send(`callback error: ${safeHtml(msg)}`);
     }
   });
 
-  // ✅ debug endpoint (اختياري مؤقت)
-  app.get("/debug/page-token", async (req, res) => {
-    const pageId = req.query.pageId;
-    if (!pageId) return res.status(400).send("missing pageId");
-    const tok = await redis.get(`page:${pageId}:token`);
-    return res.send(tok ? "✅ token exists" : "❌ token missing");
+  // ========= 3) Status route: /connect/status =========
+  app.get("/connect/status", async (req, res) => {
+    try {
+      const botId = (req.query.botId || "default").toString();
+      const key = `bot:${botId}:fb`;
+      const data = await redis.get(key);
+      if (!data) return res.status(404).json({ ok: false, botId, connected: false });
+
+      const parsed = JSON.parse(data);
+      // متطلعش التوكن كامل في الاستاتس
+      return res.json({
+        ok: true,
+        botId,
+        connected: true,
+        pageId: parsed.pageId,
+        pageName: parsed.pageName,
+        connectedAt: parsed.connectedAt,
+      });
+    } catch (e) {
+      return res.status(500).json({ ok: false, error: e?.message || String(e) });
+    }
   });
 
-  console.log("✅ auth-facebook routes loaded: /connect , /auth/facebook/callback");
+  console.log("✅ Facebook OAuth routes loaded: /connect , /facebook/callback , /connect/status");
 }
