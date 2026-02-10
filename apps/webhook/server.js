@@ -49,6 +49,33 @@ const queue = new Queue("messages", {
 app.get("/", (req, res) => res.send("Egboot webhook running ✅"));
 app.get("/health", (req, res) => res.send("OK"));
 
+// ✅ للتأكد إن الديبلوي الجديد وصل
+app.get("/version", (req, res) => {
+  res.json({
+    ok: true,
+    service: "webhook",
+    time: new Date().toISOString(),
+    hasConnectRouteExpected: true,
+  });
+});
+
+// ✅ Debug: اعرض كل الـ routes اللي متسجلة
+app.get("/debug/routes", (req, res) => {
+  try {
+    const routes = [];
+    const stack = app?._router?.stack || [];
+    for (const layer of stack) {
+      if (layer?.route?.path) {
+        const methods = Object.keys(layer.route.methods || {}).map((m) => m.toUpperCase());
+        routes.push({ path: layer.route.path, methods });
+      }
+    }
+    res.json({ routes });
+  } catch (e) {
+    res.status(500).json({ error: e?.message || String(e) });
+  }
+});
+
 // ✅ Facebook OAuth Routes:
 // /connect?email=someone@gmail.com
 // /auth/facebook/callback
@@ -93,18 +120,18 @@ app.post("/webhook", async (req, res) => {
       try {
         if (pageId) {
           const ownerEmail = await redis.get(`page:${pageId}:owner_email`);
-          if (ownerEmail) botId = ownerEmail; // نخليه botId = email (Multi-tenant)
+          if (ownerEmail) botId = ownerEmail; // botId = email (Multi-tenant)
         }
 
         await queue.add(
           "incoming_message",
           {
             botId,
-            pageId,          // ✅ مهم
+            pageId,
             senderId,
             text,
             mid,
-            event,           // optional raw event
+            event,
           },
           {
             jobId: mid ? `mid_${mid}` : undefined,
@@ -120,6 +147,7 @@ app.post("/webhook", async (req, res) => {
 // ================= Start =================
 const server = app.listen(PORT, "0.0.0.0", () => {
   console.log(`🚀 Webhook running on port ${PORT}`);
+  console.log("✅ OAuth routes registered: /connect , /auth/facebook/callback");
 });
 
 // ================= Graceful Shutdown =================
