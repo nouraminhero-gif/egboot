@@ -1,3 +1,4 @@
+console.log("🔥 auth-facebook.js LOADED");
 // apps/webhook/auth-facebook.js
 import crypto from "crypto";
 import axios from "axios";
